@@ -3,6 +3,7 @@
     "name": "ComponentProject",
     "slug": "ComponentProject",
     "version": "1.0.0",
+    "entryPoint": "./index.js",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
