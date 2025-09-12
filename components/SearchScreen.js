@@ -1,5 +1,7 @@
+
 import React, { useState } from 'react';
 import { View, Text, TextInput, Button } from 'react-native';
+import BuildingSvgComponent from './BuildingSvgComponent';
 
 
 const SearchScreen = ({ navigation }) => {
@@ -15,6 +17,9 @@ const SearchScreen = ({ navigation }) => {
         onChangeText={setSearch}
       />
       <Button title="Søg" onPress={() => navigation.navigate('Rooms', { room: search })} />
+      <View style={{ marginTop: 30 }}>
+        <BuildingSvgComponent highlightRoom={search} width={350} height={120} />
+      </View>
     </View>
   );
 };
