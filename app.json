@@ -1,7 +1,7 @@
 {
   "expo": {
-    "name": "ComponentProject",
-    "slug": "ComponentProject",
+    "name": "navigation",
+    "slug": "navigation",
     "version": "1.0.0",
     "entryPoint": "./index.js",
     "orientation": "portrait",

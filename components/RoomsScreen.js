@@ -1,6 +1,7 @@
 
 import React from 'react';
 import { View, Text, FlatList } from 'react-native';
+import styles from './styles';
 import BuildingSvgComponent from './BuildingSvgComponent';
 
 const ROOMS = [
@@ -25,26 +26,19 @@ const RoomsScreen = ({ route }) => {
   };
 
   return (
-    <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#f0f0f0' }}>
-      <Text style={{ fontSize: 22, marginBottom: 20 }}>Alle rum</Text>
+    <View style={styles.container}>
+      <Text style={styles.title}>Alle rum</Text>
       <FlatList
         data={ROOMS}
         keyExtractor={item => item.id}
         renderItem={({ item }) => (
-          <Text style={{
-            fontSize: 18,
-            padding: 10,
-            marginVertical: 4,
-            backgroundColor: highlightRoom === item.id ? 'lightgreen' : '#fff',
-            borderRadius: 5,
-            width: 120,
-            textAlign: 'center',
-            color: highlightRoom === item.id ? '#222' : '#000',
-            fontWeight: highlightRoom === item.id ? 'bold' : 'normal',
-          }}>{item.name}</Text>
+          <Text style={[
+            styles.room,
+            highlightRoom === item.id && styles.highlight,
+          ]}>{item.name}</Text>
         )}
       />
-      <View style={{ marginTop: 30 }}>
+      <View style={styles.svgContainer}>
         <BuildingSvgComponent highlightRoom={highlightRoom} width={350} height={120} />
       </View>
     </View>
