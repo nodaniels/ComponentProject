@@ -30,19 +30,15 @@ export default function MapViewer({
   origin = { x: 150, y: 150 },
   onMatchChange,
   matchIndex = 0,
-  gridCols = 48,
-  gridRows = 64,
   debugLabels = false,
-  debugGrid = false,
   debugWalls = false,
-  pathMode = 'visibility', // 'visibility' | 'grid'
 }) {
   const ENABLE_DEBUG_LOGS = false;
   const zoomRef = useRef(null);
   const [svgString, setSvgString] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [detected, setDetected] = useState({ doors: [], corridors: [], entrances: [], rooms: [], walls: [] });
-  const [computed, setComputed] = useState({ buildingBounds: null, roomBoxes: [], corridorLines: [], grid: null });
+  const [computed, setComputed] = useState({ buildingBounds: null, roomBoxes: [], filteredWalls: [] });
   // Derive overlay viewBox from the SVG's own viewBox (preferred), else from computed building bounds, else fallback
   const rootViewBox = useMemo(() => {
     if (!svgString) return null;
@@ -130,7 +126,7 @@ export default function MapViewer({
   useEffect(() => {
     if (!svgString || svgString.trim().length === 0) {
       setDetected({ doors: [], corridors: [], entrances: [], rooms: [], walls: [] });
-      setComputed({ buildingBounds: null, roomBoxes: [], corridorLines: [], grid: null });
+      setComputed({ buildingBounds: null, roomBoxes: [], filteredWalls: [] });
       return;
     }
 
@@ -251,17 +247,22 @@ export default function MapViewer({
         if (/^<\s*g\b/i.test(tok)) {
           const a = parseAttributes(tok);
           const st = parseStyleDecl(a.style || '');
-          const style = { fill: (a.fill || st.fill || '').toLowerCase(), stroke: (a.stroke || st.stroke || '').toLowerCase() };
+          const style = {
+            fill: (a.fill || st.fill || '').toLowerCase(),
+            stroke: (a.stroke || st.stroke || '').toLowerCase(),
+            strokeWidth: (a['stroke-width'] || st['stroke-width'] || '').toLowerCase(),
+          };
           stack.push(style);
         } else {
           stack.pop();
         }
       }
       // compose, nearest ancestor wins (later in stack overrides earlier)
-      let out = { fill: '', stroke: '' };
+      let out = { fill: '', stroke: '', strokeWidth: '' };
       for (const s of stack) {
         if (s.fill) out.fill = s.fill;
         if (s.stroke) out.stroke = s.stroke;
+        if (s.strokeWidth) out.strokeWidth = s.strokeWidth;
       }
       return out;
     };
@@ -317,22 +318,73 @@ export default function MapViewer({
       }
       return (stroke || '').toLowerCase();
     };
-    const isWallStroke = (stroke) => {
-      if (!stroke) return false;
-      const s = stroke.toLowerCase();
-      // Exact hexes we've seen for walls
-      if (s === '#246b89' || s === '#246c89' || s === '#2c3e50' || s === '#93b4c3' || s === '#ffffff') return true;
-      // rgb() formatted value
-      if (/^rgb\(/.test(s)) {
-        const c = parseColorHex(s);
-        if (c) {
-          // Check closeness to #246b89 (36,107,137)
-          const dr = Math.abs(c.r - 36), dg = Math.abs(c.g - 107), db = Math.abs(c.b - 137);
-          if (dr + dg + db < 40) return true;
-        }
+    // Approx conversion from px to user units based on root viewBox vs component width
+    const pxToUnitsApprox = (() => {
+      const vbw = rootViewBox?.w || 612;
+      return vbw / Math.max(1, width);
+    })();
+    const getStrokeWidth = (attrs, pos) => {
+      let sw = attrs['stroke-width'] || '';
+      if (!sw && attrs.style) {
+        const m = /stroke-width\s*:\s*([^;"\s]+)/i.exec(attrs.style);
+        if (m) sw = m[1];
       }
-      // Fallback: low saturation (grayish)
-      return isGrayish(s);
+      if (!sw && typeof pos === 'number') {
+        const gs = computeGroupStyleAt(pos);
+        sw = gs.strokeWidth || '';
+      }
+      if (!sw) return 1; // SVG default stroke-width is 1 user unit
+      const s = String(sw).trim().toLowerCase();
+      const px = /(-?\d*\.?\d+)\s*px$/.exec(s);
+      const num = /(-?\d*\.?\d+)$/.exec(s);
+      if (px) return parseFloat(px[1]) * pxToUnitsApprox;
+      if (num) return parseFloat(num[1]);
+      return undefined;
+    };
+    const isWallStroke = (stroke, strokeWidthUnits) => {
+      // Accept walls that are either:
+      // 1) Floor-like color with medium width band, OR
+      // 2) Gray/black low-saturation thin strokes (common for interior walls), OR
+      // 3) Dark bluish strokes near #246b89 (seen in some maps)
+      if (!stroke) return false;
+      const c = parseColorHex(stroke.toLowerCase());
+      if (!c) return false;
+      const sw = strokeWidthUnits;
+      if (!isFinite(sw)) return false;
+
+      // Common bands
+      const withinUnits = sw >= 0.02 && sw <= 3.0; // ~0.12–3.0 units
+      const withinPxEquivalent = (() => {
+        const min = 2 * pxToUnitsApprox;
+        const max = 12 * pxToUnitsApprox;
+        return sw >= min && sw <= max; // ~2–12px
+      })();
+      const withinThinUnits = sw >= 0.02 && sw <= 1.6; // thinner band for hairline walls
+      const withinThinPxEq = (() => {
+        const min = 1 * pxToUnitsApprox;
+        const max = 8 * pxToUnitsApprox;
+        return sw >= min && sw <= max; // ~1–8px
+      })();
+
+      // 1) Floor-like color proximity
+      const floor = { r: 217, g: 226, b: 232 };
+      const deltaFloor = Math.abs(c.r - floor.r) + Math.abs(c.g - floor.g) + Math.abs(c.b - floor.b);
+      const floorColorOk = deltaFloor <= 42;
+      if ((floorColorOk && (withinUnits || withinPxEquivalent))) return true;
+
+      // 2) Gray/black thin strokes
+      const hsl = rgbToHsl({ r: c.r, g: c.g, b: c.b });
+      const grayish = isGrayish(stroke);
+      const grayOk = grayish && hsl.l >= 0.1 && hsl.l <= 0.8; // avoid super-light gridlines
+      if (grayOk && (withinThinUnits || withinThinPxEq)) return true;
+
+      // 3) Near #246b89 dark blue
+      const blu = { r: 36, g: 107, b: 137 };
+      const deltaBlu = Math.abs(c.r - blu.r) + Math.abs(c.g - blu.g) + Math.abs(c.b - blu.b);
+      const blueOk = deltaBlu <= 80;
+      if (blueOk && (withinUnits || withinPxEquivalent)) return true;
+
+      return false;
     };
     const parseColorHex = (str) => {
       if (!str) return null;
@@ -355,6 +407,12 @@ export default function MapViewer({
         return { r: parseInt(rgba[1], 10), g: parseInt(rgba[2], 10), b: parseInt(rgba[3], 10), a: parseFloat(rgba[4]) };
       }
       return null;
+    };
+    const colorDeltaToFloor = (colorStr) => {
+      const c = parseColorHex(colorStr || '');
+      if (!c) return undefined;
+      const floor = { r: 217, g: 226, b: 232 };
+      return Math.abs(c.r - floor.r) + Math.abs(c.g - floor.g) + Math.abs(c.b - floor.b);
     };
     const rgbToHsl = ({ r, g, b }) => {
       r /= 255; g /= 255; b /= 255;
@@ -524,20 +582,24 @@ export default function MapViewer({
         const maxY = Math.max(pTL.y, pTR.y, pBR.y, pBL.y);
     floors.push({ minX, minY, maxX, maxY, source: 'rect' });
     // Also push the rectangle outline as walls to strengthen navigation boundaries
-    walls.push({ x1: pTL.x, y1: pTL.y, x2: pTR.x, y2: pTR.y, source: 'floor-rect' });
-    walls.push({ x1: pTR.x, y1: pTR.y, x2: pBR.x, y2: pBR.y, source: 'floor-rect' });
-    walls.push({ x1: pBR.x, y1: pBR.y, x2: pBL.x, y2: pBL.y, source: 'floor-rect' });
-    walls.push({ x1: pBL.x, y1: pBL.y, x2: pTL.x, y2: pTL.y, source: 'floor-rect' });
+    const floorStroke = '#d9e2e8';
+    const fd = 0;
+    walls.push({ x1: pTL.x, y1: pTL.y, x2: pTR.x, y2: pTR.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
+    walls.push({ x1: pTR.x, y1: pTR.y, x2: pBR.x, y2: pBR.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
+    walls.push({ x1: pBR.x, y1: pBR.y, x2: pBL.x, y2: pBL.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
+    walls.push({ x1: pBL.x, y1: pBL.y, x2: pTL.x, y2: pTL.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
       }
 
       // Walls by stroke color on rectangles (rare, but keep for completeness)
   const stroke = getStrokeColor(a, tagPos);
-      if (isWallStroke(stroke)) {
+  const sw = getStrokeWidth(a, tagPos);
+      if (isWallStroke(stroke, sw)) {
         // Represent rect border as 4 segments
-        walls.push({ x1: pTL.x, y1: pTL.y, x2: pTR.x, y2: pTR.y, source: 'rect' });
-        walls.push({ x1: pTR.x, y1: pTR.y, x2: pBR.x, y2: pBR.y, source: 'rect' });
-        walls.push({ x1: pBR.x, y1: pBR.y, x2: pBL.x, y2: pBL.y, source: 'rect' });
-        walls.push({ x1: pBL.x, y1: pBL.y, x2: pTL.x, y2: pTL.y, source: 'rect' });
+        const cd = colorDeltaToFloor(stroke);
+        walls.push({ x1: pTL.x, y1: pTL.y, x2: pTR.x, y2: pTR.y, source: 'rect', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
+        walls.push({ x1: pTR.x, y1: pTR.y, x2: pBR.x, y2: pBR.y, source: 'rect', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
+        walls.push({ x1: pBR.x, y1: pBR.y, x2: pBL.x, y2: pBL.y, source: 'rect', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
+        walls.push({ x1: pBL.x, y1: pBL.y, x2: pTL.x, y2: pTL.y, source: 'rect', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
       }
     }
 
@@ -558,8 +620,10 @@ export default function MapViewer({
       const p1 = applyTransform({ x: x1, y: y1 }, M);
       const p2 = applyTransform({ x: x2, y: y2 }, M);
   const stroke = getStrokeColor(a, tagPos);
-      if (isWallStroke(stroke)) {
-        walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'line' });
+  const sw = getStrokeWidth(a, tagPos);
+      if (isWallStroke(stroke, sw)) {
+        const cd = colorDeltaToFloor(stroke);
+        walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'line', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
       }
       if (hasType(a, 'door')) {
         doors.push({ id: a.id || undefined, x: (p1.x + p2.x) / 2, y: (p1.y + p2.y) / 2, source: 'line' });
@@ -590,12 +654,14 @@ export default function MapViewer({
         .map(([x, y]) => applyTransform({ x, y }, M));
 
   const stroke = getStrokeColor(a, tagPos);
-      if (isWallStroke(stroke)) {
+  const sw = getStrokeWidth(a, tagPos);
+      if (isWallStroke(stroke, sw)) {
         // polyline broken into segments
         for (let i = 1; i < pts.length; i++) {
           const p1 = pts[i - 1];
           const p2 = pts[i];
-          walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'polyline' });
+          const cd = colorDeltaToFloor(stroke);
+          walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'polyline', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
         }
       }
       if (hasType(a, 'door')) {
@@ -662,19 +728,21 @@ export default function MapViewer({
       const tag = ph[0];
       const tagPos = ph.index;
       const a = parseAttributes(tag);
-      const fill = getFillColor(a, tagPos);
-      const stroke = getStrokeColor(a, tagPos);
+  const fill = getFillColor(a, tagPos);
+  const stroke = getStrokeColor(a, tagPos);
+  const sw = getStrokeWidth(a, tagPos);
   bumpMap(fillCounts, fill); bumpMap(strokeCounts, stroke);
   // Compose parent <g> transform with element's own transform
   const Mparent = computeGroupTransformAt(tagPos);
   const M = multT(Mparent, parseTransform(a.transform));
-      if (isWallStroke(stroke)) {
+      if (isWallStroke(stroke, sw)) {
         // treat as wall segments
         const segs = parsePathToSegments(a.d || '');
         for (const s of segs) {
           const p1 = applyTransform({ x: s.x1, y: s.y1 }, M);
           const p2 = applyTransform({ x: s.x2, y: s.y2 }, M);
-          walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'path' });
+          const cd = colorDeltaToFloor(stroke);
+          walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'path', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
         }
       }
   if (isEntranceGreen(fill) && a.d) {
@@ -708,7 +776,8 @@ export default function MapViewer({
         for (const s of segs) {
           const p1 = applyTransform({ x: s.x1, y: s.y1 }, M);
           const p2 = applyTransform({ x: s.x2, y: s.y2 }, M);
-          walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'floor-path' });
+          const floorStroke = '#d9e2e8';
+          walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'floor-path', strokeColor: floorStroke, strokeWidth: 2, colorDelta: 0, floorDerived: true });
         }
       }
     }
@@ -819,13 +888,13 @@ export default function MapViewer({
     } catch {}
   }, [svgString, rootViewBox]);
 
-  // --- Compute building bounds, room boxes, and a coarse corridor skeleton ---
+  // --- Compute building bounds, room boxes, and filtered walls ---
   useEffect(() => {
     const walls = detected.walls || [];
     const rooms = detected.rooms || [];
     const floors = detected.floors || [];
     if (!walls.length) {
-      setComputed({ buildingBounds: null, roomBoxes: [], corridorLines: [], grid: null, filteredWalls: [] });
+      setComputed({ buildingBounds: null, roomBoxes: [], filteredWalls: [] });
       return;
     }
 
@@ -913,7 +982,7 @@ export default function MapViewer({
       const map = new Map();
       for (const s of wallsInBounds) {
         const len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1);
-        if (len < 0.8) continue; // drop very tiny segments
+        if (len < 0.3) continue; // drop only extremely tiny segments (preserve thin walls)
         const k = key(s);
         if (!map.has(k)) map.set(k, s);
       }
@@ -934,96 +1003,18 @@ export default function MapViewer({
       }
     }
 
-    // Generate grid only when pathMode !== 'visibility' (we skip grid for speed when using visibility graph)
-    const corridorLines = [];
-    let grid = null;
-    if (buildingBounds && pathMode !== 'visibility') {
-      const cols = Math.max(16, (gridCols|0) || 48);
-      const rows = Math.max(16, (gridRows|0) || 64);
-      const { minX, minY, maxX, maxY } = buildingBounds;
-      const stepX = (maxX - minX) / cols;
-      const stepY = (maxY - minY) / rows;
-
-      const pointInRoom = (x, y) => {
-        for (const b of roomBoxes) {
-          if (x >= b.xL && x <= b.xR && y >= b.yT && y <= b.yB) return true;
-        }
-        return false;
-      };
-
-      // Horizontal passes (every other row to reduce density)
-      for (let j = 0; j <= rows; j += 2) {
-        let run = null;
-        for (let i = 0; i <= cols; i++) {
-          const x = minX + i * stepX;
-          const y = minY + j * stepY;
-          const insideRoom = pointInRoom(x, y);
-          if (!insideRoom) {
-            if (!run) run = [{ x, y }];
-          } else if (run) {
-            const last = minX + (i - 1) * stepX;
-            run.push({ x: last, y });
-            if (run.length >= 2) corridorLines.push(run.slice());
-            run = null;
-          }
-        }
-        if (run && run.length >= 1) {
-          const x = minX + cols * stepX;
-          const y = minY + j * stepY;
-          run.push({ x, y });
-          if (run.length >= 2) corridorLines.push(run.slice());
-        }
-      }
-
-      // Build a walkable grid (exclude room boxes and near-wall cells)
-      const nCols = cols + 1;
-      const nRows = rows + 1;
-      const walkable = Array.from({ length: nRows }, () => Array(nCols).fill(true));
-      const distPointToSeg = (pt, a, b) => {
-        const ab = { x: b.x - a.x, y: b.y - a.y };
-        const ap = { x: pt.x - a.x, y: pt.y - a.y };
-        const ab2 = ab.x * ab.x + ab.y * ab.y || 1e-6;
-        const t = Math.max(0, Math.min(1, (ap.x * ab.x + ap.y * ab.y) / ab2));
-        const proj = { x: a.x + t * ab.x, y: a.y + t * ab.y };
-        const dx = proj.x - pt.x;
-        const dy = proj.y - pt.y;
-        return Math.hypot(dx, dy);
-      };
-      const nearWall = (x, y) => {
-        const TH = Math.max(2.0, Math.min(stepX, stepY) * 0.8); // slightly larger clearance to avoid crossing thin walls
-        for (const s of wallsInBounds) {
-          const a = { x: s.x1, y: s.y1 };
-          const b = { x: s.x2, y: s.y2 };
-          if (distPointToSeg({ x, y }, a, b) <= TH) return true;
-        }
-        return false;
-      };
-      for (let j = 0; j < nRows; j++) {
-        for (let i = 0; i < nCols; i++) {
-          const x = minX + i * stepX;
-          const y = minY + j * stepY;
-          if ((roomBoxes.length > 0 && pointInRoom(x, y)) || nearWall(x, y)) {
-            walkable[j][i] = false;
-          }
-        }
-      }
-      grid = { cols: nCols, rows: nRows, minX, minY, stepX, stepY, walkable };
-    }
-
-  setComputed({ buildingBounds, roomBoxes, corridorLines, grid, filteredWalls: wallsInBounds });
+    setComputed({ buildingBounds, roomBoxes, filteredWalls: wallsInBounds });
     // Debug summary
     try {
       if (ENABLE_DEBUG_LOGS) {
         console.warn('[SVG compute]', {
           buildingBounds,
           roomBoxes: roomBoxes.length,
-          corridorLines: corridorLines.length,
-          grid: grid ? { cols: grid.cols, rows: grid.rows } : null,
           filteredWalls: wallsInBounds.length,
         });
       }
     } catch {}
-  }, [detected.walls, detected.rooms, detected.floors, gridCols, gridRows, pathMode]);
+  }, [detected.walls, detected.rooms, detected.floors]);
 
   // Compute route polyline
   // Prefer extracted room centers if available
@@ -1192,24 +1183,25 @@ export default function MapViewer({
     }
   }, [extractedTarget, detected.walls]);
   // Routing
-  // Visibility-graph shortest path (default) or fallback grid-based A*
+  // Visibility-graph shortest path with entrance inset
   const computedRoute = useMemo(() => {
     // Choose start and goal points (in SVG units)
     const goalPt = (targetDoor || target);
-    let startPt = origin;
+    // Select nearest entrance to goal (inside bounds) or fall back to origin
+    let entranceStart = null;
     if (goalPt && detected?.entrances?.length) {
       let best = null; let bestD = Infinity;
       const ents = computed?.buildingBounds
         ? detected.entrances.filter((e) => e.x >= computed.buildingBounds.minX && e.x <= computed.buildingBounds.maxX && e.y >= computed.buildingBounds.minY && e.y <= computed.buildingBounds.maxY)
         : detected.entrances;
       for (const e of ents) { const d = Math.hypot((e.x - goalPt.x), (e.y - goalPt.y)); if (d < bestD) { bestD = d; best = e; } }
-      if (best) startPt = { x: best.x, y: best.y };
+      if (best) entranceStart = { x: best.x, y: best.y };
     }
-    if (!startPt || !goalPt || !isFinite(startPt.x) || !isFinite(startPt.y) || !isFinite(goalPt.x) || !isFinite(goalPt.y)) return null;
+    const startPtRaw = entranceStart || origin;
+    if (!startPtRaw || !goalPt || !isFinite(startPtRaw.x) || !isFinite(startPtRaw.y) || !isFinite(goalPt.x) || !isFinite(goalPt.y)) return null;
 
-    if (pathMode === 'visibility') {
-      const walls = computed?.filteredWalls?.length ? computed.filteredWalls : detected.walls || [];
-      if (!walls.length) return [startPt, goalPt];
+    const walls = computed?.filteredWalls?.length ? computed.filteredWalls : detected.walls || [];
+    if (!walls.length) return [startPtRaw, goalPt];
 
       // Helpers
       const bboxOverlap = (ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) => !(ax2 < bx1 || bx2 < ax1 || ay2 < by1 || by2 < ay1);
@@ -1242,6 +1234,49 @@ export default function MapViewer({
         }
         return true;
       };
+
+      // Inset start point slightly inside the building if starting from an entrance
+      const insetFromEntrance = (E, G) => {
+        if (!E) return E;
+        const dir = (() => {
+          const vx = G.x - E.x, vy = G.y - E.y; const d = Math.hypot(vx, vy) || 1;
+          return { x: vx / d, y: vy / d };
+        })();
+        const angles = [0, 15, -15, 30, -30, 45, -45, 60, -60];
+        const dists = [6, 10, 14];
+        let best = null;
+        let bestScore = Infinity;
+        const rot = (v, deg) => {
+          const a = (deg * Math.PI) / 180; const ca = Math.cos(a), sa = Math.sin(a);
+          return { x: v.x * ca - v.y * sa, y: v.x * sa + v.y * ca };
+        };
+        const countIntersections = (P, Q) => {
+          let c = 0;
+          const minX = Math.min(P.x, Q.x) - 0.001, maxX = Math.max(P.x, Q.x) + 0.001;
+          const minY = Math.min(P.y, Q.y) - 0.001, maxY = Math.max(P.y, Q.y) + 0.001;
+          for (const w of walls) {
+            if (!bboxOverlap(minX, minY, maxX, maxY, Math.min(w.x1, w.x2), Math.min(w.y1, w.y2), Math.max(w.x1, w.x2), Math.max(w.y1, w.y2))) continue;
+            if (segIntersect(P, Q, { x: w.x1, y: w.y1 }, { x: w.x2, y: w.y2 })) c++;
+          }
+          return c;
+        };
+        for (const deg of angles) {
+          const v = rot(dir, deg);
+          for (const d of dists) {
+            const C = { x: E.x + v.x * d, y: E.y + v.y * d };
+            // Prefer candidates with no wall between E->C and fewer intersections to G
+            const edgeHits = countIntersections(E, C);
+            const toGoalHits = countIntersections(C, G);
+            const score = edgeHits * 100 + toGoalHits * 10 + Math.hypot(C.x - G.x, C.y - G.y) * 0.001;
+            if (edgeHits === 0 && (!best || score < bestScore)) {
+              best = C; bestScore = score;
+            }
+          }
+        }
+        return best || { x: E.x + dir.x * 8, y: E.y + dir.y * 8 };
+      };
+
+      const startPt = entranceStart ? insetFromEntrance(startPtRaw, goalPt) : startPtRaw;
 
       // If straight is clear, use it
       if (visible(startPt, goalPt)) return [startPt, goalPt];
@@ -1385,142 +1420,7 @@ export default function MapViewer({
       }
       // Last resort: if still not connected, return null to avoid freezing
       return null;
-    }
-
-    // Fallback: grid-based A*
-    if (!computed?.grid || !computed?.buildingBounds) return null;
-    const { grid } = computed;
-    const { cols, rows, minX, minY, stepX, stepY } = grid;
-    let walkable = grid.walkable;
-    const toIndex = (i, j) => j * cols + i;
-    const inBounds = (i, j) => i >= 0 && j >= 0 && i < cols && j < rows;
-    const nearestNode = (pt) => {
-      const i = Math.round((pt.x - minX) / stepX);
-      const j = Math.round((pt.y - minY) / stepY);
-      for (let R = 2; R <= 6; R++) { // expand search radius if needed
-        let best = null;
-        let bestD = Infinity;
-        for (let dj = -R; dj <= R; dj++) {
-          for (let di = -R; di <= R; di++) {
-            const ii = i + di, jj = j + dj;
-            if (!inBounds(ii, jj)) continue;
-            if (!walkable[jj][ii]) continue;
-            const x = minX + ii * stepX;
-            const y = minY + jj * stepY;
-            const d = Math.hypot(x - pt.x, y - pt.y);
-            if (d < bestD) { bestD = d; best = { i: ii, j: jj }; }
-          }
-        }
-        if (best) return best;
-      }
-      return null;
-    };
-
-    const S = nearestNode(startPt);
-    const G = nearestNode(goalPt);
-  if (!S || !G) return null;
-
-    const open = new Set();
-    const came = new Map();
-    const gScore = new Map();
-    const fScore = new Map();
-    const key = (i, j) => `${i},${j}`;
-    const h = (i, j) => Math.abs(i - G.i) * stepX + Math.abs(j - G.j) * stepY;
-    const push = (i, j) => { open.add(key(i, j)); };
-    const popLowest = () => {
-      let bestK = null, bestF = Infinity;
-      for (const k of open) {
-        const f = fScore.get(k) ?? Infinity;
-        if (f < bestF) { bestF = f; bestK = k; }
-      }
-      if (bestK) open.delete(bestK);
-      return bestK;
-    };
-    const setScore = (map, i, j, v) => map.set(key(i, j), v);
-    const getScore = (map, i, j) => map.get(key(i, j));
-
-    setScore(gScore, S.i, S.j, 0);
-    setScore(fScore, S.i, S.j, h(S.i, S.j));
-    push(S.i, S.j);
-
-    const neighbors = [ [1,0], [-1,0], [0,1], [0,-1] ];
-    let found = null;
-    while (open.size) {
-      const curK = popLowest();
-      if (!curK) break;
-      const [ci, cj] = curK.split(',').map((n) => parseInt(n, 10));
-      if (ci === G.i && cj === G.j) { found = curK; break; }
-
-      for (const [dx, dy] of neighbors) {
-        const ni = ci + dx, nj = cj + dy;
-        if (!inBounds(ni, nj)) continue;
-        if (!walkable[nj][ni]) continue;
-        const tentative = (getScore(gScore, ci, cj) ?? Infinity) + ((dx === 0 || dy === 0) ? (dx !== 0 ? stepX : stepY) : Math.hypot(stepX, stepY));
-        const ng = getScore(gScore, ni, nj) ?? Infinity;
-        if (tentative < ng) {
-          came.set(key(ni, nj), curK);
-          setScore(gScore, ni, nj, tentative);
-          setScore(fScore, ni, nj, tentative + h(ni, nj));
-          if (!open.has(key(ni, nj))) push(ni, nj);
-        }
-      }
-    }
-
-    if (!found) {
-      // Retry once with slightly relaxed clearance by allowing a few more cells near walls
-      // We simulate by enabling isolated false cells that have walkable neighbors
-      const clone = walkable.map((row) => row.slice());
-      for (let j = 1; j < rows - 1; j++) {
-        for (let i = 1; i < cols - 1; i++) {
-          if (!clone[j][i]) {
-            const neigh = [clone[j][i-1], clone[j][i+1], clone[j-1][i], clone[j+1][i]].filter(Boolean).length;
-            if (neigh >= 3) clone[j][i] = true;
-          }
-        }
-      }
-      walkable = clone;
-      // restart A* with new walkable
-      open.clear(); came.clear(); gScore.clear(); fScore.clear();
-      setScore(gScore, S.i, S.j, 0);
-      setScore(fScore, S.i, S.j, h(S.i, S.j));
-      push(S.i, S.j);
-      found = null;
-      while (open.size) {
-        const curK = popLowest();
-        if (!curK) break;
-        const [ci, cj] = curK.split(',').map((n) => parseInt(n, 10));
-        if (ci === G.i && cj === G.j) { found = curK; break; }
-        for (const [dx, dy] of neighbors) {
-          const ni = ci + dx, nj = cj + dy;
-          if (!inBounds(ni, nj)) continue;
-          if (!walkable[nj][ni]) continue;
-          const tentative = (getScore(gScore, ci, cj) ?? Infinity) + ((dx === 0 || dy === 0) ? (dx !== 0 ? stepX : stepY) : Math.hypot(stepX, stepY));
-          const ng = getScore(gScore, ni, nj) ?? Infinity;
-          if (tentative < ng) {
-            came.set(key(ni, nj), curK);
-            setScore(gScore, ni, nj, tentative);
-            setScore(fScore, ni, nj, tentative + h(ni, nj));
-            if (!open.has(key(ni, nj))) push(ni, nj);
-          }
-        }
-      }
-      if (!found) return null;
-    }
-    // Reconstruct path
-    const path = [];
-    let k = found;
-    while (k) {
-      const [i, j] = k.split(',').map((n) => parseInt(n, 10));
-      const x = minX + i * stepX;
-      const y = minY + j * stepY;
-      path.push({ x, y });
-      k = came.get(k);
-    }
-    path.reverse();
-    // sanitize: only keep finite points
-    const clean = path.filter((p) => p && isFinite(p.x) && isFinite(p.y));
-    return clean.length >= 2 ? clean : null;
-  }, [computed.grid, computed.buildingBounds, origin, targetDoor, target, detected.entrances, pathMode]);
+  }, [computed.buildingBounds, origin, targetDoor, target, detected.entrances]);
 
   // Choose a specific entrance as start: nearest entrance to goal if available; else provided origin in-bounds
   const startPoint = useMemo(() => {
@@ -1646,18 +1546,23 @@ export default function MapViewer({
           pointerEvents="none"
         >
           {/* Overlay border for viewBox alignment */}
-          {debugLabels && (
-            <Rect
-              x={overlayViewBox.minX}
-              y={overlayViewBox.minY}
-              width={overlayViewBox.w}
-              height={overlayViewBox.h}
-              stroke="#8e44ad"
-              strokeWidth={U(2)}
-              strokeDasharray="2,2"
-              fill="none"
-              opacity={0.3}
-            />
+          {debugWalls && (
+            <G key="debug-walls">
+              {(((computed && computed.filteredWalls && computed.filteredWalls.length) ? computed.filteredWalls : (detected && detected.walls)) || []).map((w, i) => {
+                const mx = (w.x1 + w.x2) / 2;
+                const my = (w.y1 + w.y2) / 2;
+                const color = w.strokeColor || '#ff00ff';
+                const swTxt = typeof w.strokeWidth === 'number' ? w.strokeWidth.toFixed(2) : String(w.strokeWidth || '');
+                const deltaTxt = typeof w.colorDelta === 'number' ? w.colorDelta.toFixed(0) : '';
+                return (
+                  <G key={`dw-${i}`} opacity={0.8}>
+                    <Polyline points={`${w.x1},${w.y1} ${w.x2},${w.y2}`} fill="none" stroke="#ff00ff" strokeWidth={0.2} />
+                    <Circle cx={mx} cy={my} r={0.6} fill={color} />
+                    <SvgText x={mx + 0.8} y={my - 0.8} fontSize={2.2} fill="#333">{`sw:${swTxt}${deltaTxt !== '' ? ` Δ:${deltaTxt}` : ''}`}</SvgText>
+                  </G>
+                );
+              })}
+            </G>
           )}
           {/* Building bounds (debug) */}
           {computed.buildingBounds && (
@@ -1714,19 +1619,7 @@ export default function MapViewer({
               <SvgText x={r.x + U(5)} y={r.y - U(4)} fontSize={U(8)} fill="#ff00aa">{r.id}</SvgText>
             </G>
           ))}
-          {/* Grid nodes preview (sparse) */}
-          {debugGrid && computed?.grid && (() => {
-            const dots = [];
-            const { cols, rows, minX, minY, stepX, stepY, walkable } = computed.grid;
-            for (let j = 0; j < rows; j += Math.max(1, Math.floor(rows / 20))) {
-              for (let i = 0; i < cols; i += Math.max(1, Math.floor(cols / 20))) {
-                const x = minX + i * stepX;
-                const y = minY + j * stepY;
-                dots.push(<Circle key={`grid-${i}-${j}`} cx={x} cy={y} r={U(1.5)} fill={walkable[j][i] ? '#2ecc71' : '#e74c3c'} opacity={0.6} />);
-              }
-            }
-            return <G>{dots}</G>;
-          })()}
+          {/* Grid overlay removed */}
           {/* Corridors overlay disabled by default */}
 
           {/* Doors overlay hidden */}
