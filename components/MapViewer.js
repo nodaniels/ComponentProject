@@ -17,7 +17,7 @@ export const roomIndex = {
 function buildRoute(origin, target) {
   if (!origin || !target) return null;
   if (!isFinite(origin.x) || !isFinite(origin.y) || !isFinite(target.x) || !isFinite(target.y)) return null;
-  return [origin, target];
+  return [origin, target]; // Return the origin and target points
 }
 
 // Minimal XML path extractor for a subset of elements; for static display only
@@ -35,7 +35,10 @@ export default function MapViewer({
   debugLabels = false,
   debugGrid = false,
   debugWalls = false,
+  pathMode = 'visibility', // 'visibility' | 'grid'
 }) {
+  const ENABLE_DEBUG_LOGS = false;
+  const zoomRef = useRef(null);
   const [svgString, setSvgString] = useState(null);
   const [loadError, setLoadError] = useState(null);
   const [detected, setDetected] = useState({ doors: [], corridors: [], entrances: [], rooms: [], walls: [] });
@@ -277,11 +280,12 @@ export default function MapViewer({
     const isFloorFill = (fill) => {
       if (!fill) return false;
       const f = fill.toLowerCase();
-      if (f === '#d9e2e8') return true;
+      if (f === '#d9e2e8' || f === '#dbe2e8') return true;
       const c = parseColorHex(f);
       if (c) {
         const dr = Math.abs(c.r - 217), dg = Math.abs(c.g - 226), db = Math.abs(c.b - 232);
         if (dr + dg + db < 32) return true;
+        if (c.r === 219 && c.g === 226 && c.b === 232 && (c.a === undefined || c.a === 1 || c.a === 255)) return true;
       }
       return false;
     };
@@ -335,6 +339,7 @@ export default function MapViewer({
       const s = str.trim().toLowerCase();
       const hex = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(s);
       const rgb = /^rgb\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*\)$/i.exec(s);
+      const rgba = /^rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+(?:\.\d+)?)\s*\)$/i.exec(s);
       if (hex) {
         let h = hex[1];
         if (h.length === 3) h = h.split('').map((c) => c + c).join('');
@@ -345,6 +350,9 @@ export default function MapViewer({
       }
       if (rgb) {
         return { r: parseInt(rgb[1], 10), g: parseInt(rgb[2], 10), b: parseInt(rgb[3], 10) };
+      }
+      if (rgba) {
+        return { r: parseInt(rgba[1], 10), g: parseInt(rgba[2], 10), b: parseInt(rgba[3], 10), a: parseFloat(rgba[4]) };
       }
       return null;
     };
@@ -514,7 +522,12 @@ export default function MapViewer({
         const minY = Math.min(pTL.y, pTR.y, pBR.y, pBL.y);
         const maxX = Math.max(pTL.x, pTR.x, pBR.x, pBL.x);
         const maxY = Math.max(pTL.y, pTR.y, pBR.y, pBL.y);
-        floors.push({ minX, minY, maxX, maxY, source: 'rect' });
+    floors.push({ minX, minY, maxX, maxY, source: 'rect' });
+    // Also push the rectangle outline as walls to strengthen navigation boundaries
+    walls.push({ x1: pTL.x, y1: pTL.y, x2: pTR.x, y2: pTR.y, source: 'floor-rect' });
+    walls.push({ x1: pTR.x, y1: pTR.y, x2: pBR.x, y2: pBR.y, source: 'floor-rect' });
+    walls.push({ x1: pBR.x, y1: pBR.y, x2: pBL.x, y2: pBL.y, source: 'floor-rect' });
+    walls.push({ x1: pBL.x, y1: pBL.y, x2: pTL.x, y2: pTL.y, source: 'floor-rect' });
       }
 
       // Walls by stroke color on rectangles (rare, but keep for completeness)
@@ -633,6 +646,12 @@ export default function MapViewer({
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         for (const p of pts) { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y); }
         if (isFinite(minX)) floors.push({ minX, minY, maxX, maxY, source: 'polygon' });
+        // Add polygon edges as walls
+        for (let i = 0; i < pts.length; i++) {
+          const aPt = pts[i];
+          const bPt = pts[(i + 1) % pts.length];
+          walls.push({ x1: aPt.x, y1: aPt.y, x2: bPt.x, y2: bPt.y, source: 'floor-polygon' });
+        }
       }
     }
 
@@ -685,6 +704,12 @@ export default function MapViewer({
           maxX = Math.max(maxX, p1.x, p2.x); maxY = Math.max(maxY, p1.y, p2.y);
         }
         if (isFinite(minX)) floors.push({ minX, minY, maxX, maxY, source: 'path' });
+        // Add each segment of the path as a wall
+        for (const s of segs) {
+          const p1 = applyTransform({ x: s.x1, y: s.y1 }, M);
+          const p2 = applyTransform({ x: s.x2, y: s.y2 }, M);
+          walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'floor-path' });
+        }
       }
     }
 
@@ -777,18 +802,20 @@ export default function MapViewer({
     setDetected({ doors, corridors, entrances, rooms, walls, floors });
     // Debug summary
     try {
-      const topStrokes = Array.from(strokeCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,8);
-      const topFills = Array.from(fillCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,8);
-      console.warn('[SVG detect]', {
-        doors: doors.length,
-        corridors: corridors.length,
-        entrances: entrances.length,
-        rooms: rooms.length,
-        walls: walls.length,
-        floors: floors.length,
-        topStrokes,
-        topFills,
-      });
+      if (ENABLE_DEBUG_LOGS) {
+        const topStrokes = Array.from(strokeCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,8);
+        const topFills = Array.from(fillCounts.entries()).sort((a,b)=>b[1]-a[1]).slice(0,8);
+        console.warn('[SVG detect]', {
+          doors: doors.length,
+          corridors: corridors.length,
+          entrances: entrances.length,
+          rooms: rooms.length,
+          walls: walls.length,
+          floors: floors.length,
+          topStrokes,
+          topFills,
+        });
+      }
     } catch {}
   }, [svgString, rootViewBox]);
 
@@ -866,7 +893,7 @@ export default function MapViewer({
     const buildingBounds = floorBounds || roomBounds || wallBounds;
 
     // Keep only walls inside the building bounds (with a small margin)
-    const wallsInBounds = (buildingBounds && walls.length)
+    let wallsInBounds = (buildingBounds && walls.length)
       ? walls.filter((s) => {
           const { minX, minY, maxX, maxY } = buildingBounds;
           const M = 10; // margin in SVG units
@@ -875,6 +902,23 @@ export default function MapViewer({
           return in1 || in2;
         })
       : walls.slice();
+
+    // Deduplicate nearly-identical wall segments and drop tiny ones
+    if (wallsInBounds.length) {
+      const key = (s) => {
+        const ax = Math.round(s.x1 * 2), ay = Math.round(s.y1 * 2);
+        const bx = Math.round(s.x2 * 2), by = Math.round(s.y2 * 2);
+        return ax <= bx ? `${ax},${ay}|${bx},${by}` : `${bx},${by}|${ax},${ay}`;
+      };
+      const map = new Map();
+      for (const s of wallsInBounds) {
+        const len = Math.hypot(s.x2 - s.x1, s.y2 - s.y1);
+        if (len < 0.8) continue; // drop very tiny segments
+        const k = key(s);
+        if (!map.has(k)) map.set(k, s);
+      }
+      wallsInBounds = Array.from(map.values());
+    }
 
     // Compute room boxes for every detected room label
     const roomBoxes = [];
@@ -890,10 +934,10 @@ export default function MapViewer({
       }
     }
 
-    // Generate coarse corridor skeleton using a grid and excluding room boxes
+    // Generate grid only when pathMode !== 'visibility' (we skip grid for speed when using visibility graph)
     const corridorLines = [];
     let grid = null;
-    if (buildingBounds) {
+    if (buildingBounds && pathMode !== 'visibility') {
       const cols = Math.max(16, (gridCols|0) || 48);
       const rows = Math.max(16, (gridRows|0) || 64);
       const { minX, minY, maxX, maxY } = buildingBounds;
@@ -966,18 +1010,20 @@ export default function MapViewer({
       grid = { cols: nCols, rows: nRows, minX, minY, stepX, stepY, walkable };
     }
 
-    setComputed({ buildingBounds, roomBoxes, corridorLines, grid, filteredWalls: wallsInBounds });
+  setComputed({ buildingBounds, roomBoxes, corridorLines, grid, filteredWalls: wallsInBounds });
     // Debug summary
     try {
-      console.warn('[SVG compute]', {
-        buildingBounds,
-        roomBoxes: roomBoxes.length,
-        corridorLines: corridorLines.length,
-        grid: grid ? { cols: grid.cols, rows: grid.rows } : null,
-        filteredWalls: wallsInBounds.length,
-      });
+      if (ENABLE_DEBUG_LOGS) {
+        console.warn('[SVG compute]', {
+          buildingBounds,
+          roomBoxes: roomBoxes.length,
+          corridorLines: corridorLines.length,
+          grid: grid ? { cols: grid.cols, rows: grid.rows } : null,
+          filteredWalls: wallsInBounds.length,
+        });
+      }
     } catch {}
-  }, [detected.walls, detected.rooms, detected.floors, gridCols, gridRows]);
+  }, [detected.walls, detected.rooms, detected.floors, gridCols, gridRows, pathMode]);
 
   // Compute route polyline
   // Prefer extracted room centers if available
@@ -1145,11 +1191,207 @@ export default function MapViewer({
       setTargetDoor(null);
     }
   }, [extractedTarget, detected.walls]);
-  // Grid-based A* pathfinding along corridor grid
+  // Routing
+  // Visibility-graph shortest path (default) or fallback grid-based A*
   const computedRoute = useMemo(() => {
+    // Choose start and goal points (in SVG units)
+    const goalPt = (targetDoor || target);
+    let startPt = origin;
+    if (goalPt && detected?.entrances?.length) {
+      let best = null; let bestD = Infinity;
+      const ents = computed?.buildingBounds
+        ? detected.entrances.filter((e) => e.x >= computed.buildingBounds.minX && e.x <= computed.buildingBounds.maxX && e.y >= computed.buildingBounds.minY && e.y <= computed.buildingBounds.maxY)
+        : detected.entrances;
+      for (const e of ents) { const d = Math.hypot((e.x - goalPt.x), (e.y - goalPt.y)); if (d < bestD) { bestD = d; best = e; } }
+      if (best) startPt = { x: best.x, y: best.y };
+    }
+    if (!startPt || !goalPt || !isFinite(startPt.x) || !isFinite(startPt.y) || !isFinite(goalPt.x) || !isFinite(goalPt.y)) return null;
+
+    if (pathMode === 'visibility') {
+      const walls = computed?.filteredWalls?.length ? computed.filteredWalls : detected.walls || [];
+      if (!walls.length) return [startPt, goalPt];
+
+      // Helpers
+      const bboxOverlap = (ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) => !(ax2 < bx1 || bx2 < ax1 || ay2 < by1 || by2 < ay1);
+      const segIntersect = (a1, a2, b1, b2) => {
+        // Bounding-box early reject
+        const minAx = Math.min(a1.x, a2.x), maxAx = Math.max(a1.x, a2.x);
+        const minAy = Math.min(a1.y, a2.y), maxAy = Math.max(a1.y, a2.y);
+        const minBx = Math.min(b1.x, b2.x), maxBx = Math.max(b1.x, b2.x);
+        const minBy = Math.min(b1.y, b2.y), maxBy = Math.max(b1.y, b2.y);
+        if (!bboxOverlap(minAx, minAy, maxAx, maxAy, minBx, minBy, maxBx, maxBy)) return false;
+        const cross = (u, v) => u.x * v.y - u.y * v.x;
+        const sub = (p, q) => ({ x: p.x - q.x, y: p.y - q.y });
+        const r = sub(a2, a1); const s = sub(b2, b1);
+        const rxs = cross(r, s); const qpxr = cross(sub(b1, a1), r);
+        if (Math.abs(rxs) < 1e-9 && Math.abs(qpxr) < 1e-9) return false; // colinear treated as passable
+        if (Math.abs(rxs) < 1e-9) return false; // parallel
+        const t = cross(sub(b1, a1), s) / rxs;
+        const u = cross(sub(b1, a1), r) / rxs;
+        return t > 0 && t < 1 && u > 0 && u < 1;
+      };
+      const visible = (p, q) => {
+        if (Math.hypot(p.x - q.x, p.y - q.y) < 1e-6) return false;
+        const minX = Math.min(p.x, q.x) - 0.001, maxX = Math.max(p.x, q.x) + 0.001;
+        const minY = Math.min(p.y, q.y) - 0.001, maxY = Math.max(p.y, q.y) + 0.001;
+        for (const w of walls) {
+          // Quick bbox reject against candidate wall
+          if (!bboxOverlap(minX, minY, maxX, maxY, Math.min(w.x1, w.x2), Math.min(w.y1, w.y2), Math.max(w.x1, w.x2), Math.max(w.y1, w.y2))) continue;
+          const A = { x: w.x1, y: w.y1 }; const B = { x: w.x2, y: w.y2 };
+          if (segIntersect(p, q, A, B)) return false;
+        }
+        return true;
+      };
+
+      // If straight is clear, use it
+      if (visible(startPt, goalPt)) return [startPt, goalPt];
+
+      // Collect relevant endpoints: intersecting walls + neighborhoods
+      const b = computed?.buildingBounds;
+      const wallsInBounds = walls.filter((w) => !b || bboxOverlap(Math.min(w.x1,w.x2), Math.min(w.y1,w.y2), Math.max(w.x1,w.x2), Math.max(w.y1,w.y2), b.minX-1, b.minY-1, b.maxX+1, b.maxY+1));
+      const nodes = [];
+      const seen = new Set();
+      const pushNode = (pt) => {
+        if (!isFinite(pt.x) || !isFinite(pt.y)) return;
+        const key = `${Math.round(pt.x*10)},${Math.round(pt.y*10)}`;
+        if (!seen.has(key)) { seen.add(key); nodes.push(pt); }
+      };
+      pushNode(startPt); pushNode(goalPt);
+
+      const addWallEndpoints = (pred) => {
+        for (const w of wallsInBounds) {
+          const a = { x: w.x1, y: w.y1 }, c = { x: w.x2, y: w.y2 };
+          if (!pred || pred(w, a, c)) { pushNode(a); pushNode(c); }
+        }
+      };
+      // Add endpoints of walls intersecting the direct segment
+      const sgMinX = Math.min(startPt.x, goalPt.x), sgMaxX = Math.max(startPt.x, goalPt.x);
+      const sgMinY = Math.min(startPt.y, goalPt.y), sgMaxY = Math.max(startPt.y, goalPt.y);
+      addWallEndpoints((w, a, c) => {
+        if (!bboxOverlap(sgMinX, sgMinY, sgMaxX, sgMaxY, Math.min(w.x1,w.x2), Math.min(w.y1,w.y2), Math.max(w.x1,w.x2), Math.max(w.y1,w.y2))) return false;
+        return segIntersect(startPt, goalPt, a, c);
+      });
+      // Add endpoints within radius around start and goal
+      const D = Math.hypot(goalPt.x - startPt.x, goalPt.y - startPt.y) || 1;
+      const rStart = Math.max(120, Math.min(600, D * 0.35));
+      const rGoal  = Math.max(120, Math.min(600, D * 0.35));
+      addWallEndpoints((w, a, c) => (Math.hypot(a.x - startPt.x, a.y - startPt.y) <= rStart || Math.hypot(c.x - startPt.x, c.y - startPt.y) <= rStart));
+      addWallEndpoints((w, a, c) => (Math.hypot(a.x - goalPt.x, goalPt.y - a.y) <= rGoal || Math.hypot(c.x - goalPt.x, c.y - goalPt.y) <= rGoal));
+
+      // Hard cap nodes; if over, thin by nearest to the line segment
+  const MAX_NODES = 400;
+      if (nodes.length > MAX_NODES) {
+        const lineDist = (p) => {
+          const vx = goalPt.x - startPt.x, vy = goalPt.y - startPt.y;
+          const wx = p.x - startPt.x, wy = p.y - startPt.y;
+          const v2 = vx*vx + vy*vy || 1;
+          const t = Math.max(0, Math.min(1, (wx*vx + wy*vy) / v2));
+          const px = startPt.x + t*vx, py = startPt.y + t*vy;
+          return Math.hypot(p.x - px, p.y - py);
+        };
+        // Keep start+goal and closest to line
+        const core = nodes.slice(2).sort((a,b) => lineDist(a) - lineDist(b)).slice(0, MAX_NODES - 2);
+        const thinned = [startPt, goalPt, ...core];
+        nodes.length = 0; seen.clear();
+        for (const p of thinned) pushNode(p);
+      }
+
+      // Build sparse visibility edges: k-nearest only
+  const K = 10;
+      const edges = Array.from({ length: nodes.length }, () => []);
+      const idxOf = (pt) => nodes.findIndex((n) => Math.abs(n.x - pt.x) < 1e-6 && Math.abs(n.y - pt.y) < 1e-6);
+      let sIdx = idxOf(startPt), gIdx = idxOf(goalPt);
+      // Candidate neighbor indices per node
+      for (let i = 0; i < nodes.length; i++) {
+        // Find K nearest neighbors without sorting all N: do a simple K-select
+        const dists = [];
+        for (let j = 0; j < nodes.length; j++) {
+          if (j === i) continue;
+          const d = Math.hypot(nodes[i].x - nodes[j].x, nodes[i].y - nodes[j].y);
+          if (dists.length < K) {
+            dists.push({ j, d });
+            if (dists.length === K) dists.sort((a,b) => a.d - b.d);
+          } else if (d < dists[dists.length - 1].d) {
+            dists[dists.length - 1] = { j, d };
+            // bubble down last element to keep array sorted
+            let p = dists.length - 1;
+            while (p > 0 && dists[p].d < dists[p-1].d) { const tmp = dists[p-1]; dists[p-1] = dists[p]; dists[p] = tmp; p--; }
+          }
+        }
+        let added = 0;
+        for (const cand of dists) {
+          const a = nodes[i], c = nodes[cand.j];
+          if (visible(a, c)) {
+            edges[i].push({ j: cand.j, w: cand.d });
+            added++;
+            if (added >= K) break;
+          }
+        }
+      }
+      // Dijkstra
+      const dist = new Array(nodes.length).fill(Infinity);
+      const prev = new Array(nodes.length).fill(-1);
+      const used = new Array(nodes.length).fill(false);
+      dist[sIdx] = 0;
+      for (let iter = 0; iter < nodes.length; iter++) {
+        let u = -1, best = Infinity;
+        for (let i = 0; i < nodes.length; i++) if (!used[i] && dist[i] < best) { best = dist[i]; u = i; }
+        if (u === -1) break;
+        if (u === gIdx) break;
+        used[u] = true;
+        for (const e of edges[u]) {
+          if (dist[u] + e.w < dist[e.j]) { dist[e.j] = dist[u] + e.w; prev[e.j] = u; }
+        }
+      }
+      if (isFinite(dist[gIdx])) {
+        const path = [];
+        for (let v = gIdx; v !== -1; v = prev[v]) path.push(nodes[v]);
+        path.reverse();
+        return path;
+      }
+
+      // Fast greedy fallback: step around first blocking wall via its nearer endpoint
+      const path = [startPt];
+      let cur = startPt;
+      const MAX_STEPS = 80;
+      for (let step = 0; step < MAX_STEPS; step++) {
+        if (visible(cur, goalPt)) { path.push(goalPt); return path; }
+        // Find closest intersection along (cur->goal)
+        let bestT = Infinity, bestSeg = null, bestW = null;
+        const r = { x: goalPt.x - cur.x, y: goalPt.y - cur.y };
+        for (const w of wallsInBounds) {
+          const A = { x: w.x1, y: w.y1 }, B = { x: w.x2, y: w.y2 };
+          if (!bboxOverlap(Math.min(cur.x, goalPt.x), Math.min(cur.y, goalPt.y), Math.max(cur.x, goalPt.x), Math.max(cur.y, goalPt.y), Math.min(A.x,B.x), Math.min(A.y,B.y), Math.max(A.x,B.x), Math.max(A.y,B.y))) continue;
+          // Intersection param t along cur->goal
+          const cross = (u, v) => u.x * v.y - u.y * v.x;
+          const v2 = { x: B.x - A.x, y: B.y - A.y };
+          const denom = cross(r, v2);
+          if (Math.abs(denom) < 1e-9) continue;
+          const t = cross({ x: A.x - cur.x, y: A.y - cur.y }, v2) / denom;
+          const u = cross({ x: A.x - cur.x, y: A.y - cur.y }, r) / denom;
+          if (t > 0 && t < 1 && u >= 0 && u <= 1) {
+            if (t < bestT) { bestT = t; bestSeg = { A, B }; bestW = w; }
+          }
+        }
+        if (!bestSeg) break; // shouldn't happen due to earlier visible() test
+        // Choose detour via the closer endpoint to goal that is visible
+        const candPts = [bestSeg.A, bestSeg.B];
+        candPts.sort((a,b) => Math.hypot(a.x - goalPt.x, a.y - goalPt.y) - Math.hypot(b.x - goalPt.x, b.y - goalPt.y));
+        let picked = null;
+        for (const cp of candPts) { if (visible(cur, cp)) { picked = cp; break; } }
+        if (!picked) { picked = candPts[0]; }
+        path.push(picked);
+        cur = picked;
+      }
+      // Last resort: if still not connected, return null to avoid freezing
+      return null;
+    }
+
+    // Fallback: grid-based A*
     if (!computed?.grid || !computed?.buildingBounds) return null;
     const { grid } = computed;
-    const { cols, rows, minX, minY, stepX, stepY, walkable } = grid;
+    const { cols, rows, minX, minY, stepX, stepY } = grid;
+    let walkable = grid.walkable;
     const toIndex = (i, j) => j * cols + i;
     const inBounds = (i, j) => i >= 0 && j >= 0 && i < cols && j < rows;
     const nearestNode = (pt) => {
@@ -1174,22 +1416,6 @@ export default function MapViewer({
       return null;
     };
 
-  const goalPt = (targetDoor || target);
-    // Choose nearest entrance as start if available; else use provided origin
-    let startPt = origin;
-    if (goalPt && detected?.entrances?.length) {
-      let best = null; let bestD = Infinity;
-      // Prefer entrances inside building bounds if available
-      const ents = computed?.buildingBounds
-        ? detected.entrances.filter((e) => e.x >= computed.buildingBounds.minX && e.x <= computed.buildingBounds.maxX && e.y >= computed.buildingBounds.minY && e.y <= computed.buildingBounds.maxY)
-        : detected.entrances;
-      for (const e of ents) {
-        const d = Math.hypot((e.x - goalPt.x), (e.y - goalPt.y));
-        if (d < bestD) { bestD = d; best = e; }
-      }
-      if (best) startPt = { x: best.x, y: best.y };
-    }
-  if (!startPt || !goalPt || !isFinite(startPt.x) || !isFinite(startPt.y) || !isFinite(goalPt.x) || !isFinite(goalPt.y)) return null;
     const S = nearestNode(startPt);
     const G = nearestNode(goalPt);
   if (!S || !G) return null;
@@ -1240,7 +1466,46 @@ export default function MapViewer({
       }
     }
 
-    if (!found) return null;
+    if (!found) {
+      // Retry once with slightly relaxed clearance by allowing a few more cells near walls
+      // We simulate by enabling isolated false cells that have walkable neighbors
+      const clone = walkable.map((row) => row.slice());
+      for (let j = 1; j < rows - 1; j++) {
+        for (let i = 1; i < cols - 1; i++) {
+          if (!clone[j][i]) {
+            const neigh = [clone[j][i-1], clone[j][i+1], clone[j-1][i], clone[j+1][i]].filter(Boolean).length;
+            if (neigh >= 3) clone[j][i] = true;
+          }
+        }
+      }
+      walkable = clone;
+      // restart A* with new walkable
+      open.clear(); came.clear(); gScore.clear(); fScore.clear();
+      setScore(gScore, S.i, S.j, 0);
+      setScore(fScore, S.i, S.j, h(S.i, S.j));
+      push(S.i, S.j);
+      found = null;
+      while (open.size) {
+        const curK = popLowest();
+        if (!curK) break;
+        const [ci, cj] = curK.split(',').map((n) => parseInt(n, 10));
+        if (ci === G.i && cj === G.j) { found = curK; break; }
+        for (const [dx, dy] of neighbors) {
+          const ni = ci + dx, nj = cj + dy;
+          if (!inBounds(ni, nj)) continue;
+          if (!walkable[nj][ni]) continue;
+          const tentative = (getScore(gScore, ci, cj) ?? Infinity) + ((dx === 0 || dy === 0) ? (dx !== 0 ? stepX : stepY) : Math.hypot(stepX, stepY));
+          const ng = getScore(gScore, ni, nj) ?? Infinity;
+          if (tentative < ng) {
+            came.set(key(ni, nj), curK);
+            setScore(gScore, ni, nj, tentative);
+            setScore(fScore, ni, nj, tentative + h(ni, nj));
+            if (!open.has(key(ni, nj))) push(ni, nj);
+          }
+        }
+      }
+      if (!found) return null;
+    }
     // Reconstruct path
     const path = [];
     let k = found;
@@ -1255,7 +1520,7 @@ export default function MapViewer({
     // sanitize: only keep finite points
     const clean = path.filter((p) => p && isFinite(p.x) && isFinite(p.y));
     return clean.length >= 2 ? clean : null;
-  }, [computed.grid, computed.buildingBounds, origin, targetDoor, target, detected.entrances]);
+  }, [computed.grid, computed.buildingBounds, origin, targetDoor, target, detected.entrances, pathMode]);
 
   // Choose a specific entrance as start: nearest entrance to goal if available; else provided origin in-bounds
   const startPoint = useMemo(() => {
@@ -1294,6 +1559,60 @@ export default function MapViewer({
     return arr[idx];
   }, [boundedMatches, matches, matchIndex]);
 
+  // Auto-center and fit: when route/start/selected changes, center and zoom so all are visible
+  useEffect(() => {
+    if (!zoomRef.current) return;
+    // Gather points of interest in SVG units (overlay viewBox space)
+    const pts = [];
+    if (selectedMatch && isFinite(selectedMatch.x) && isFinite(selectedMatch.y)) pts.push({ x: selectedMatch.x, y: selectedMatch.y });
+    if (startPoint && isFinite(startPoint.x) && isFinite(startPoint.y)) pts.push({ x: startPoint.x, y: startPoint.y });
+    if (route && route.length) {
+      for (const p of route) {
+        if (p && isFinite(p.x) && isFinite(p.y)) pts.push(p);
+      }
+    }
+    if (pts.length === 0) return;
+    // Map overlay viewBox units to pre-zoom pixels using preserveAspectRatio
+    const vb = overlayViewBox;
+    const viewW = width; const viewH = height;
+    const par = String(overlayPAR || 'xMidYMid meet').toLowerCase();
+    const hasNone = par.includes('none');
+    const hasSlice = par.includes('slice');
+    const alignX = par.includes('xmin') ? 'min' : par.includes('xmax') ? 'max' : 'mid';
+    const alignY = par.includes('ymin') ? 'min' : par.includes('ymax') ? 'max' : 'mid';
+    let sx, sy, tx0, ty0;
+    if (hasNone) {
+      sx = viewW / vb.w; sy = viewH / vb.h;
+      tx0 = -vb.minX * sx; ty0 = -vb.minY * sy;
+    } else {
+      const s = hasSlice ? Math.max(viewW / vb.w, viewH / vb.h) : Math.min(viewW / vb.w, viewH / vb.h);
+      sx = sy = s;
+      const remW = viewW - vb.w * s;
+      const remH = viewH - vb.h * s;
+      const dx = alignX === 'min' ? 0 : alignX === 'max' ? remW : remW / 2;
+      const dy = alignY === 'min' ? 0 : alignY === 'max' ? remH : remH / 2;
+      tx0 = dx - vb.minX * s; ty0 = dy - vb.minY * s;
+    }
+    const toPx = (pt) => ({ x: pt.x * sx + tx0, y: pt.y * sy + ty0 });
+    // Compute bounds in pixels (pre-outer-zoom)
+    let minPx = Infinity, minPy = Infinity, maxPx = -Infinity, maxPy = -Infinity;
+    for (const p of pts) {
+      const q = toPx(p);
+      minPx = Math.min(minPx, q.x); minPy = Math.min(minPy, q.y);
+      maxPx = Math.max(maxPx, q.x); maxPy = Math.max(maxPy, q.y);
+    }
+    if (!isFinite(minPx) || !isFinite(minPy) || !isFinite(maxPx) || !isFinite(maxPy)) return;
+    const padPx = Math.max(viewW, viewH) * 0.05;
+    minPx -= padPx; minPy -= padPx; maxPx += padPx; maxPy += padPx;
+    const contentW = Math.max(1, maxPx - minPx);
+    const contentH = Math.max(1, maxPy - minPy);
+    let nextScale = Math.min(viewW / contentW, viewH / contentH);
+    nextScale = Math.max(0.5, Math.min(3, nextScale));
+    const tx = (viewW - contentW * nextScale) / 2 - minPx * nextScale;
+    const ty = (viewH - contentH * nextScale) / 2 - minPy * nextScale;
+    try { zoomRef.current.setTransform({ nextScale, nextTranslateX: tx, nextTranslateY: ty, animate: true, duration: 280 }); } catch {}
+  }, [width, height, overlayViewBox, selectedMatch, startPoint, route]);
+
   if (svgString === null) {
     return (
       <View style={{ width, height, alignItems: 'center', justifyContent: 'center' }}>
@@ -1305,7 +1624,7 @@ export default function MapViewer({
   // Render the actual uploaded SVG, and overlay route/markers using a separate absolute-positioned Svg
   const canRenderXml = typeof svgString === 'string' && svgString.trim().length > 0;
   return (
-    <ZoomableView initialScale={0.9} style={{ width, height }}>
+    <ZoomableView ref={zoomRef} initialScale={0.9} style={{ width, height }}>
       <View style={{ width, height, position: 'relative', backgroundColor: '#f7f9f8' }}>
         {/* Base floorplan */}
         {canRenderXml ? (
@@ -1410,30 +1729,23 @@ export default function MapViewer({
           })()}
           {/* Corridors overlay disabled by default */}
 
-          {/* Doors overlay */}
-          {detected.doors.map((d, idx) => (
-            <Circle key={`door-${d.id || idx}`} cx={d.x} cy={d.y} r={U(6)} fill="#e67e22" />
-          ))}
+          {/* Doors overlay hidden */}
 
           {/* Only the chosen entrance (startPoint) */}
           {startPoint && startPoint.__isEntrance && (
             <G>
-              <Circle cx={startPoint.x} cy={startPoint.y} r={U(8)} fill="#53b848" />
-              <Circle cx={startPoint.x} cy={startPoint.y} r={U(12)} fill="none" stroke="#27ae60" strokeWidth={U(3)} />
+              <Circle cx={startPoint.x} cy={startPoint.y} r={U(5)} fill="#e67e22" />
             </G>
           )}
 
-          {/* Detected door for highlighted room */}
-          {targetDoor && (
-            <Circle cx={targetDoor.x} cy={targetDoor.y} r={U(9)} fill="#e67e22" stroke="#fff" strokeWidth={U(2)} />
-          )}
+          {/* Detected door marker hidden */}
           {/* No separate start dot; nearest entrance is highlighted with a green ring above */}
           {/* Route polyline (drawn below markers so dots are visible) */}
           {route && route.length >= 2 && canRenderXml && route.every(p => isFinite(p.x) && isFinite(p.y)) && (
             <Polyline
               points={route.map((p) => `${p.x},${p.y}`).join(' ')}
               stroke="#27ae60"
-              strokeWidth={U(6)}
+              strokeWidth={U(3)}
               fill="none"
               strokeLinejoin="round"
               strokeLinecap="round"
@@ -1443,9 +1755,7 @@ export default function MapViewer({
           {/* Only selected room marker */}
           {selectedMatch && (
             <G>
-              <Circle cx={selectedMatch.x} cy={selectedMatch.y} r={U(12)} fill="#2ecc71" stroke="#ffffff" strokeWidth={U(2)} />
-              <SvgText x={selectedMatch.x + U(6)} y={selectedMatch.y - U(4)} fontSize={U(10)} fill="#2ecc71">{selectedMatch.id}</SvgText>
-              <SvgText x={selectedMatch.x + U(6)} y={selectedMatch.y + U(12)} fontSize={U(10)} fill="#2ecc71">{`(${Math.round(selectedMatch.x)}, ${Math.round(selectedMatch.y)})`}</SvgText>
+              <Circle cx={selectedMatch.x} cy={selectedMatch.y} r={U(5)} fill="#2ecc71" />
             </G>
           )}
           {debugLabels && (

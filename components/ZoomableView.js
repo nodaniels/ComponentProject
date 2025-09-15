@@ -1,15 +1,15 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useImperativeHandle, useRef, useState } from 'react';
 import { View, Animated, PanResponder, StyleSheet, Platform } from 'react-native';
 
 // A lightweight pinch-zoom + pan container using Animated + PanResponder (no extra deps)
 // Props: children, minScale, maxScale, initialScale, style
-export default function ZoomableView({
+function ZoomableView({
   children,
   minScale = 0.5,
   maxScale = 3,
   initialScale = 1,
   style,
-}) {
+}, ref) {
   const scale = useRef(new Animated.Value(initialScale)).current;
   const translateX = useRef(new Animated.Value(0)).current;
   const translateY = useRef(new Animated.Value(0)).current;
@@ -18,6 +18,7 @@ export default function ZoomableView({
   const lastTranslateRef = useRef({ x: 0, y: 0 });
   const pinchDistanceRef = useRef(null);
   const pinchCenterRef = useRef({ x: 0, y: 0 });
+  const [size, setSize] = useState({ w: 0, h: 0 });
 
   const getDistance = (touches) => {
     const [a, b] = touches;
@@ -49,9 +50,20 @@ export default function ZoomableView({
           const dist = getDistance(touches);
           if (pinchDistanceRef.current) {
             const factor = dist / pinchDistanceRef.current;
-            let next = lastScaleRef.current * factor;
-            next = Math.max(minScale, Math.min(maxScale, next));
-            scale.setValue(next);
+            let nextScale = Math.max(minScale, Math.min(maxScale, lastScaleRef.current * factor));
+            // Zoom around the center of the container to keep context
+            const cx = size.w ? size.w / 2 : 0;
+            const cy = size.h ? size.h / 2 : 0;
+            const curScale = lastScaleRef.current;
+            const curTx = lastTranslateRef.current.x;
+            const curTy = lastTranslateRef.current.y;
+            const wx = (cx - curTx) / curScale;
+            const wy = (cy - curTy) / curScale;
+            const nextTx = cx - wx * nextScale;
+            const nextTy = cy - wy * nextScale;
+            scale.setValue(nextScale);
+            translateX.setValue(nextTx);
+            translateY.setValue(nextTy);
           }
         } else if (touches.length === 1) {
           // Pan
@@ -151,6 +163,35 @@ export default function ZoomableView({
     translateY.setValue(nextTy);
   }, [maxScale, minScale, scale, translateX, translateY]);
 
+  // Imperative API to allow parent to set transforms programmatically
+  useImperativeHandle(ref, () => ({
+    setTransform: ({ nextScale, nextTranslateX, nextTranslateY, animate = true, duration = 250 } = {}) => {
+      let s = typeof nextScale === 'number' ? nextScale : lastScaleRef.current;
+      let tx = typeof nextTranslateX === 'number' ? nextTranslateX : lastTranslateRef.current.x;
+      let ty = typeof nextTranslateY === 'number' ? nextTranslateY : lastTranslateRef.current.y;
+      s = Math.max(minScale, Math.min(maxScale, s));
+      if (animate) {
+        Animated.timing(scale, { toValue: s, duration, useNativeDriver: true }).start(({ finished }) => {
+          if (finished) lastScaleRef.current = s;
+        });
+        Animated.timing(translateX, { toValue: tx, duration, useNativeDriver: true }).start(({ finished }) => {
+          if (finished) lastTranslateRef.current.x = tx;
+        });
+        Animated.timing(translateY, { toValue: ty, duration, useNativeDriver: true }).start(({ finished }) => {
+          if (finished) lastTranslateRef.current.y = ty;
+        });
+      } else {
+        scale.setValue(s);
+        translateX.setValue(tx);
+        translateY.setValue(ty);
+        lastScaleRef.current = s;
+        lastTranslateRef.current = { x: tx, y: ty };
+      }
+    },
+    getSize: () => ({ ...size }),
+    getState: () => ({ scale: lastScaleRef.current, translate: { ...lastTranslateRef.current } }),
+  }), [maxScale, minScale, scale, translateX, translateY, size]);
+
   return (
     <View
       style={[styles.container, style]}
@@ -158,11 +199,17 @@ export default function ZoomableView({
       // The following events are only effective on web
       onWheel={onWheel}
       onDoubleClick={onDoubleClick}
+      onLayout={(e) => {
+        const { width, height } = e.nativeEvent.layout;
+        setSize({ w: width, h: height });
+      }}
     >
       <Animated.View style={animatedStyle}>{children}</Animated.View>
     </View>
   );
 }
+
+export default React.forwardRef(ZoomableView);
 
 const styles = StyleSheet.create({
   container: {
