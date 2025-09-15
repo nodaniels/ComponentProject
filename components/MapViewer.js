@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { View, ActivityIndicator, Text } from 'react-native';
+import { View, ActivityIndicator, Text, TouchableOpacity } from 'react-native';
 import Svg, { G, Rect, Circle, Polyline, SvgXml, Text as SvgText } from 'react-native-svg';
 import ZoomableView from './ZoomableView';
 // Use legacy API to avoid deprecation/runtime issues on SDK 54
@@ -32,6 +32,7 @@ export default function MapViewer({
   matchIndex = 0,
   debugLabels = false,
   debugWalls = false,
+  autoFitOnChange = false,
 }) {
   const ENABLE_DEBUG_LOGS = false;
   const zoomRef = useRef(null);
@@ -81,6 +82,27 @@ export default function MapViewer({
     return vbw / Math.max(1, width);
   }, [overlayViewBox, width]);
   const U = (px) => Math.max(1, px * pxToUnits);
+
+  // Imperative zoom helper: zoom around the center by a factor
+  const zoomBy = (factor = 1.2) => {
+    if (!zoomRef.current) return;
+    try {
+      const st = zoomRef.current.getState ? zoomRef.current.getState() : null;
+      if (!st) return;
+      const curScale = st.scale || 1;
+      const curTx = (st.translate && st.translate.x) || 0;
+      const curTy = (st.translate && st.translate.y) || 0;
+      const nextScale = Math.max(0.5, Math.min(3, curScale * factor));
+      if (!isFinite(nextScale) || nextScale === curScale) return;
+      const cx = width / 2;
+      const cy = height / 2;
+      const wx = (cx - curTx) / curScale;
+      const wy = (cy - curTy) / curScale;
+      const nextTx = cx - wx * nextScale;
+      const nextTy = cy - wy * nextScale;
+      zoomRef.current.setTransform?.({ nextScale, nextTranslateX: nextTx, nextTranslateY: nextTy, animate: true, duration: 180 });
+    } catch {}
+  };
 
   // Match base preserveAspectRatio if present on root <svg>
   const overlayPAR = useMemo(() => {
@@ -1459,8 +1481,9 @@ export default function MapViewer({
     return arr[idx];
   }, [boundedMatches, matches, matchIndex]);
 
-  // Auto-center and fit: when route/start/selected changes, center and zoom so all are visible
+  // Optional auto-center/fit: when route/start/selected changes
   useEffect(() => {
+    if (!autoFitOnChange) return; // disabled by default
     if (!zoomRef.current) return;
     // Gather points of interest in SVG units (overlay viewBox space)
     const pts = [];
@@ -1511,7 +1534,7 @@ export default function MapViewer({
     const tx = (viewW - contentW * nextScale) / 2 - minPx * nextScale;
     const ty = (viewH - contentH * nextScale) / 2 - minPy * nextScale;
     try { zoomRef.current.setTransform({ nextScale, nextTranslateX: tx, nextTranslateY: ty, animate: true, duration: 280 }); } catch {}
-  }, [width, height, overlayViewBox, selectedMatch, startPoint, route]);
+  }, [width, height, overlayViewBox, selectedMatch, startPoint, route, autoFitOnChange]);
 
   if (svgString === null) {
     return (
@@ -1524,8 +1547,9 @@ export default function MapViewer({
   // Render the actual uploaded SVG, and overlay route/markers using a separate absolute-positioned Svg
   const canRenderXml = typeof svgString === 'string' && svgString.trim().length > 0;
   return (
-    <ZoomableView ref={zoomRef} initialScale={0.9} style={{ width, height }}>
-      <View style={{ width, height, position: 'relative', backgroundColor: '#f7f9f8' }}>
+    <View style={{ width, height, position: 'relative' }}>
+      <ZoomableView ref={zoomRef} initialScale={0.9} style={{ width, height }}>
+        <View style={{ width, height, position: 'relative', backgroundColor: '#f7f9f8' }}>
         {/* Base floorplan */}
         {canRenderXml ? (
           <SvgXml xml={svgString} width={width} height={height} pointerEvents="none" />
@@ -1690,7 +1714,25 @@ export default function MapViewer({
             </G>
           )}
         </Svg>
+        </View>
+      </ZoomableView>
+      {/* Zoom controls (outside ZoomableView so gestures don't intercept) */}
+      <View pointerEvents="box-none" style={{ position: 'absolute', right: 12, bottom: 12, gap: 10 }}>
+        <TouchableOpacity
+          onPress={() => zoomBy(1.2)}
+          activeOpacity={0.8}
+          style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: 'white', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 2, marginBottom: 8 }}
+        >
+          <Text style={{ fontSize: 22, color: '#222' }}>+</Text>
+        </TouchableOpacity>
+        <TouchableOpacity
+          onPress={() => zoomBy(1 / 1.2)}
+          activeOpacity={0.8}
+          style={{ width: 44, height: 44, borderRadius: 22, backgroundColor: 'white', alignItems: 'center', justifyContent: 'center', shadowColor: '#000', shadowOpacity: 0.15, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 2 }}
+        >
+          <Text style={{ fontSize: 22, color: '#222' }}>−</Text>
+        </TouchableOpacity>
       </View>
-    </ZoomableView>
+    </View>
   );
 }
