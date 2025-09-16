@@ -1,9 +1,9 @@
 import React, { useState, useEffect } from 'react';
-import { View, Text, ScrollView, ActivityIndicator, StyleSheet, Dimensions } from 'react-native';
+import { View, Text, ScrollView, StyleSheet, Dimensions } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
-import Svg, { Circle, Text as SvgText } from 'react-native-svg';
+import Svg, { Circle } from 'react-native-svg';
 
 const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText, onMatchChange, currentMatchIndex = 0 }) => {
   const [isLoading, setIsLoading] = useState(false);
@@ -141,8 +141,9 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
         const textLayer = document.getElementById('textLayer');
         textLayer.style.width = viewport.width + 'px';
         textLayer.style.height = viewport.height + 'px';
+        textLayer.style.display = 'none'; // Hide text layer completely
         
-        // Render text layer
+        // Render text layer (invisible, only for coordinate extraction)
         await pdfjsLib.renderTextLayer({
           textContentSource: textContent,
           container: textLayer,
@@ -382,31 +383,21 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
 
   return (
     <ScrollView style={styles.container}>
-      <View style={styles.header}>
-        <Text style={styles.title}>PDF Scanner - {buildingId}</Text>
-        {isLoading && <ActivityIndicator style={styles.spinner} />}
-      </View>
-
       {error && (
         <View style={styles.errorContainer}>
           <Text style={styles.errorText}>{error}</Text>
         </View>
       )}
 
-      <View style={styles.fileInfo}>
-        <Text style={styles.fileName}>📄 {fileName}</Text>
-        {allRooms.length > 0 && (
-          <Text style={styles.stats}>
-            Total: {allRooms.length} rooms and {allEntrances.length} entrances
-          </Text>
-        )}
-        {searchText && totalMatches > 0 && (
+      {/* Only show search results when actively searching */}
+      {searchText && totalMatches > 0 && (
+        <View style={styles.searchInfo}>
           <Text style={styles.searchStats}>
             Viser: {displayRooms[0]?.id || displayRooms[0]?.text || 'N/A'} ({currentIndex + 1} af {totalMatches})
             {nearestEntrance && ' • Nærmeste indgang vist'}
           </Text>
-        )}
-      </View>
+        </View>
+      )}
 
       {pdfHtml && (
         <View style={styles.pdfContainer}>
@@ -506,21 +497,18 @@ const styles = StyleSheet.create({
     color: '#c62828',
     fontSize: 14,
   },
-  fileInfo: {
+  searchInfo: {
     margin: 16,
+    marginBottom: 8,
     padding: 12,
-    backgroundColor: 'white',
+    backgroundColor: '#e3f2fd',
     borderRadius: 8,
   },
-  fileName: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: '#333',
-    marginBottom: 4,
-  },
-  stats: {
+  searchStats: {
     fontSize: 14,
-    color: '#666',
+    fontWeight: 'bold',
+    color: '#1976d2',
+    textAlign: 'center',
   },
   pdfContainer: {
     margin: 16,
