@@ -1,9 +1,8 @@
 
 import React, { useState, useCallback } from 'react';
-import { View, Text, TextInput, Button, Alert, TouchableOpacity } from 'react-native';
+import { View, Text, TextInput, Button, TouchableOpacity } from 'react-native';
 import styles from './styles';
 import PDFViewer from './PDFViewer';
-
 
 const SearchScreen = ({ navigation, route }) => {
   const [search, setSearch] = useState('');
@@ -14,18 +13,18 @@ const SearchScreen = ({ navigation, route }) => {
   const runSearch = () => {
     const q = (search || '').trim();
     setCommitted(q);
-    // Reset selection for a new query
-    setMatchIndex(0);
+    setMatchIndex(0); // Reset to first match for new search
   };
 
-  // Use useCallback to prevent onMatchChange from being recreated on every render
-  const handleMatchChange = useCallback((rooms) => {
-    if (rooms && Array.isArray(rooms)) {
-      const count = rooms.length;
-      const ids = rooms.map(room => room.id || room.text);
+  const handleMatchChange = useCallback((allMatches, currentIndex) => {
+    if (allMatches && Array.isArray(allMatches)) {
+      const count = allMatches.length;
+      const ids = allMatches.map(room => room.id || room.text);
       setMatchInfo({ count, ids });
+    } else {
+      setMatchInfo({ count: 0, ids: [] });
     }
-  }, []); // Empty dependency array to prevent recreation
+  }, []);
 
   // Prefer selected SVG from route; else use first entry from generated buildings list; fallback to a known file.
   // Get building information from route params
@@ -58,20 +57,43 @@ const SearchScreen = ({ navigation, route }) => {
               <Text style={{ marginBottom: 8 }}>
                 Fundet {matchInfo.count} match{matchInfo.count !== 1 ? 'es' : ''}
                 {matchInfo.ids[matchIndex] ? ` — viser: ${matchInfo.ids[matchIndex]}` : ''}
+                {` (${matchIndex + 1} af ${matchInfo.count})`}
               </Text>
               {matchInfo.count > 1 && (
-                <View style={{ flexDirection: 'row', gap: 12 }}>
+                <View style={{ flexDirection: 'row', gap: 12, marginTop: 8 }}>
                   <TouchableOpacity
-                    onPress={() => matchInfo.count > 0 && setMatchIndex((i) => (i - 1 + matchInfo.count) % matchInfo.count)}
-                    style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#eee', borderRadius: 6 }}
+                    onPress={() => {
+                      if (matchInfo.count > 1) {
+                        setMatchIndex((i) => (i - 1 + matchInfo.count) % matchInfo.count);
+                      }
+                    }}
+                    style={{ 
+                      paddingHorizontal: 16, 
+                      paddingVertical: 8, 
+                      backgroundColor: '#007AFF', 
+                      borderRadius: 8,
+                      minWidth: 80,
+                      alignItems: 'center'
+                    }}
                   >
-                    <Text>Forrige</Text>
+                    <Text style={{ color: 'white', fontWeight: '500' }}>Forrige</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    onPress={() => matchInfo.count > 0 && setMatchIndex((i) => (i + 1) % matchInfo.count)}
-                    style={{ paddingHorizontal: 12, paddingVertical: 6, backgroundColor: '#eee', borderRadius: 6 }}
+                    onPress={() => {
+                      if (matchInfo.count > 1) {
+                        setMatchIndex((i) => (i + 1) % matchInfo.count);
+                      }
+                    }}
+                    style={{ 
+                      paddingHorizontal: 16, 
+                      paddingVertical: 8, 
+                      backgroundColor: '#007AFF', 
+                      borderRadius: 8,
+                      minWidth: 80,
+                      alignItems: 'center'
+                    }}
                   >
-                    <Text>Næste</Text>
+                    <Text style={{ color: 'white', fontWeight: '500' }}>Næste</Text>
                   </TouchableOpacity>
                 </View>
               )}
@@ -89,6 +111,7 @@ const SearchScreen = ({ navigation, route }) => {
           pdfAssetModule={pdfAssetModule}
           searchText={committed}
           onMatchChange={handleMatchChange}
+          currentMatchIndex={matchIndex}
         />
       </View>
     </View>

@@ -5,10 +5,10 @@ import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
 import Svg, { Circle, Text as SvgText } from 'react-native-svg';
 
-const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText, onMatchChange }) => {
+const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText, onMatchChange, currentMatchIndex = 0 }) => {
   const [isLoading, setIsLoading] = useState(false);
-  const [rooms, setRooms] = useState([]);
-  const [entrances, setEntrances] = useState([]);
+  const [allRooms, setAllRooms] = useState([]); // Store all rooms but don't show by default
+  const [allEntrances, setAllEntrances] = useState([]); // Store all entrances
   const [error, setError] = useState(null);
   const [pdfHtml, setPdfHtml] = useState(null);
   const [pdfDimensions, setPdfDimensions] = useState({ width: 400, height: 300 });
@@ -16,6 +16,67 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
   const screenWidth = Dimensions.get('window').width;
   const viewerWidth = screenWidth - 32;
   const viewerHeight = Math.round(viewerWidth * (pdfDimensions.height / pdfDimensions.width));
+
+  // Filter rooms based on search and find nearest entrance
+  const getSearchResults = () => {
+    if (!searchText || !searchText.trim()) {
+      return { rooms: [], nearestEntrance: null, allMatches: [], currentIndex: 0, totalMatches: 0 };
+    }
+
+    const searchTerm = searchText.toLowerCase().trim();
+    
+    // Get all matching rooms
+    const allMatches = allRooms.filter(room => 
+      room.id.toLowerCase().includes(searchTerm) || 
+      room.text.toLowerCase().includes(searchTerm)
+    );
+    
+    if (allMatches.length === 0) {
+      return { rooms: [], nearestEntrance: null, allMatches: [], currentIndex: 0, totalMatches: 0 };
+    }
+    
+    // Ensure currentMatchIndex is within bounds
+    const validIndex = Math.max(0, Math.min(currentMatchIndex || 0, allMatches.length - 1));
+    
+    // Get the current room to display based on currentMatchIndex
+    const currentRoom = allMatches[validIndex];
+    const roomsToShow = currentRoom ? [currentRoom] : [];
+
+    // Find nearest entrance to the current room
+    let nearestEntrance = null;
+    if (currentRoom && allEntrances.length > 0) {
+      let minDistance = Infinity;
+      
+      allEntrances.forEach(entrance => {
+        const distance = Math.sqrt(
+          Math.pow(entrance.x - currentRoom.x, 2) + 
+          Math.pow(entrance.y - currentRoom.y, 2)
+        );
+        if (distance < minDistance) {
+          minDistance = distance;
+          nearestEntrance = entrance;
+        }
+      });
+    }
+
+    return { 
+      rooms: roomsToShow, 
+      nearestEntrance, 
+      allMatches,
+      currentIndex: validIndex,
+      totalMatches: allMatches.length
+    };
+  };
+
+  const { rooms: displayRooms, nearestEntrance, allMatches, currentIndex, totalMatches } = getSearchResults();
+
+  // Update parent when search changes
+  useEffect(() => {
+    if (onMatchChange && allRooms.length > 0) {
+      const searchResults = getSearchResults();
+      onMatchChange(searchResults.allMatches, searchResults.currentIndex);
+    }
+  }, [searchText, currentMatchIndex, allRooms.length, allEntrances.length]);
 
   // Create HTML with PDF.js
   const createPdfHtml = (base64Data) => {
@@ -80,14 +141,6 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
         const textLayer = document.getElementById('textLayer');
         textLayer.style.width = viewport.width + 'px';
         textLayer.style.height = viewport.height + 'px';
-        
-        // Debug: Send raw text content to check what we're getting
-        const allTextItems = textContent.items.map(item => item.str).join(' ');
-        window.ReactNativeWebView.postMessage(JSON.stringify({
-          type: 'debug',
-          message: 'Raw PDF text: ' + allTextItems.substring(0, 500) + '...',
-          totalItems: textContent.items.length
-        }));
         
         // Render text layer
         await pdfjsLib.renderTextLayer({
@@ -278,15 +331,8 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
           setPdfDimensions({ width: data.width, height: data.height });
           break;
           
-        case 'debug':
-          console.log('PDF.js Debug:', data.message);
-          console.log('Total text items:', data.totalItems);
-          break;
-          
         case 'extracted':
-          console.log('PDF.js extracted:', data.rooms.length, 'rooms,', data.entrances.length, 'entrances');
-          
-          // Convert normalized coordinates to screen coordinates
+          // Convert normalized coordinates to screen coordinates and store all items
           const screenRooms = data.rooms.map(room => ({
             ...room,
             x: room.x * viewerWidth,
@@ -300,17 +346,14 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
             y: entrance.y * viewerHeight
           }));
           
-          setRooms(screenRooms);
-          setEntrances(screenEntrances);
+          // Store all rooms and entrances but don't display by default
+          setAllRooms(screenRooms);
+          setAllEntrances(screenEntrances);
           
-          // Call parent callback with filtered rooms for search
+          // Call parent callback with current search results
           if (onMatchChange) {
-            const filtered = searchText 
-              ? screenRooms.filter(room => 
-                  room.id.toLowerCase().includes(searchText.toLowerCase())
-                )
-              : screenRooms;
-            onMatchChange(filtered);
+            const searchResults = getSearchResults();
+            onMatchChange(searchResults.allMatches, searchResults.currentIndex);
           }
           break;
           
@@ -326,8 +369,16 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
 
   // Filter rooms for search highlighting
   const filteredRooms = searchText 
-    ? rooms.filter(room => room.id.toLowerCase().includes(searchText.toLowerCase()))
-    : rooms;
+    ? allRooms.filter(room => room.id.toLowerCase().includes(searchText.toLowerCase()))
+    : [];
+
+  // Update parent callback when search changes
+  useEffect(() => {
+    if (onMatchChange && allRooms.length > 0) {
+      const searchResults = getSearchResults();
+      onMatchChange(searchResults.allMatches, searchResults.currentIndex);
+    }
+  }, [searchText, allRooms.length]);
 
   return (
     <ScrollView style={styles.container}>
@@ -344,9 +395,15 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
 
       <View style={styles.fileInfo}>
         <Text style={styles.fileName}>📄 {fileName}</Text>
-        {rooms.length > 0 && (
+        {allRooms.length > 0 && (
           <Text style={styles.stats}>
-            Found {rooms.length} rooms and {entrances.length} entrances
+            Total: {allRooms.length} rooms and {allEntrances.length} entrances
+          </Text>
+        )}
+        {searchText && totalMatches > 0 && (
+          <Text style={styles.searchStats}>
+            Viser: {displayRooms[0]?.id || displayRooms[0]?.text || 'N/A'} ({currentIndex + 1} af {totalMatches})
+            {nearestEntrance && ' • Nærmeste indgang vist'}
           </Text>
         )}
       </View>
@@ -364,83 +421,38 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
               onError={(error) => setError(`WebView error: ${error.nativeEvent.description}`)}
             />
             
-            {/* Overlay markers */}
+            {/* Overlay markers - only show when searching */}
             <Svg 
               style={StyleSheet.absoluteFill}
               width={viewerWidth} 
               height={viewerHeight}
             >
-              {/* Room markers - green circles */}
-              {rooms.map((room, index) => {
-                const isHighlighted = searchText && 
-                  room.id.toLowerCase().includes(searchText.toLowerCase());
-                
-                return (
-                  <Circle
-                    key={`room-${index}`}
-                    cx={room.x}
-                    cy={room.y}
-                    r={isHighlighted ? 12 : 8}
-                    fill={isHighlighted ? "#4CAF50" : "#81C784"}
-                    stroke="#2E7D32"
-                    strokeWidth={2}
-                    opacity={0.9}
-                  />
-                );
-              })}
-              
-              {/* Room labels */}
-              {rooms.map((room, index) => {
-                const isHighlighted = searchText && 
-                  room.id.toLowerCase().includes(searchText.toLowerCase());
-                
-                return (
-                  <SvgText
-                    key={`room-label-${index}`}
-                    x={room.x}
-                    y={room.y - 15}
-                    fontSize={isHighlighted ? "14" : "12"}
-                    fontWeight={isHighlighted ? "bold" : "normal"}
-                    fill="#1B5E20"
-                    textAnchor="middle"
-                    stroke="white"
-                    strokeWidth="1"
-                  >
-                    {room.id}
-                  </SvgText>
-                );
-              })}
-              
-              {/* Entrance markers - orange circles */}
-              {entrances.map((entrance, index) => (
+              {/* Show matching rooms when searching */}
+              {searchText && displayRooms.map((room, index) => (
                 <Circle
-                  key={`entrance-${index}`}
-                  cx={entrance.x}
-                  cy={entrance.y}
+                  key={`room-${index}`}
+                  cx={room.x}
+                  cy={room.y}
                   r={10}
-                  fill="#FF9800"
-                  stroke="#F57C00"
+                  fill="#4CAF50"
+                  stroke="#2E7D32"
                   strokeWidth={2}
                   opacity={0.9}
                 />
               ))}
               
-              {/* Entrance labels */}
-              {entrances.map((entrance, index) => (
-                <SvgText
-                  key={`entrance-label-${index}`}
-                  x={entrance.x}
-                  y={entrance.y - 15}
-                  fontSize="10"
-                  fill="#E65100"
-                  fontWeight="bold"
-                  textAnchor="middle"
-                  stroke="white"
-                  strokeWidth="1"
-                >
-                  Indgang
-                </SvgText>
-              ))}
+              {/* Show nearest entrance when searching and found */}
+              {searchText && nearestEntrance && (
+                <Circle
+                  cx={nearestEntrance.x}
+                  cy={nearestEntrance.y}
+                  r={8}
+                  fill="#FF9800"
+                  stroke="#F57C00"
+                  strokeWidth={2}
+                  opacity={0.9}
+                />
+              )}
             </Svg>
           </View>
         </View>
