@@ -1,16 +1,15 @@
-// Static list of available building SVGs; add more as you drop files into assets/bygninger
+// Static list of available building SVGs - FALLBACK ONLY
+// Note: This file is only used as a fallback when buildings.generated.js is not available
+// New buildings should be managed through the generate-buildings.js workflow
 export const BUILDINGS = [
   {
-    id: 'demo-building',
-    name: 'Demo bygning',
-    // Default simple two-rooms demo SVG
-    svg: require('../assets/bygninger/building.svg'),
+    id: 'building',
+    name: 'Building',
+    // This building has been moved to scannedebyggninger and is generated dynamically
+    svg: require('../assets/scannedebyggninger/building/floorplan.svg'),
   },
-  {
-    id: 'porcelanshaven-stue',
-    name: 'Porcelænshaven – Stueetage',
-    svg: require('../assets/bygninger/stueetage_kl_9_cbs_porcelanshaven_2.svg'),
-  },
+  // Note: Other buildings should be in bygninger folder and processed through the workflow
+  // The system will only show buildings that have been fully processed in scannedebyggninger
 ];
 
 export default BUILDINGS;

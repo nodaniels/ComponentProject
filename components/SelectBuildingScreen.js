@@ -3,13 +3,13 @@ import { View, Text, FlatList, TouchableOpacity } from 'react-native';
 import styles from './styles';
 let BUILDINGS;
 try {
-  // Prefer auto-generated list from assets/bygninger
+  // Load buildings from generated list (PDF files)
   // eslint-disable-next-line global-require
-  BUILDINGS = require('./buildings.generated').default;
+  BUILDINGS = require('../assets/buildings').default;
 } catch (e) {
-  // Fallback to static list during initial setup
-  // eslint-disable-next-line global-require
-  BUILDINGS = require('./buildings').default;
+  // Fallback to empty list if no buildings file exists
+  console.warn('No buildings.js found, run: node scripts/generate-buildings.js');
+  BUILDINGS = [];
 }
 
 const SelectBuildingScreen = ({ navigation }) => {
@@ -27,7 +27,11 @@ const SelectBuildingScreen = ({ navigation }) => {
         shadowRadius: 4,
         shadowOffset: { width: 0, height: 2 },
       }}
-      onPress={() => navigation.navigate('Search', { svgAssetModule: item.svg, buildingId: item.id })}
+      onPress={() => navigation.navigate('Search', { 
+        buildingId: item.id,
+        fileType: item.type,
+        fileName: item.pdfFile
+      })}
     >
       <Text style={{ fontSize: 16 }}>{item.name}</Text>
     </TouchableOpacity>

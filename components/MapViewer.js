@@ -3,7 +3,8 @@ import { View, ActivityIndicator, Text, TouchableOpacity } from 'react-native';
 import Svg, { G, Rect, Circle, Polyline, SvgXml, Text as SvgText } from 'react-native-svg';
 import ZoomableView from './ZoomableView';
 // Use legacy API to avoid deprecation/runtime issues on SDK 54
-import { readAsStringAsync } from 'expo-file-system/legacy';
+import { readAsStringAsync, writeAsStringAsync, makeDirectoryAsync } from 'expo-file-system/legacy';
+import * as FileSystem from 'expo-file-system';
 import { Asset } from 'expo-asset';
 
 // Demo room index mapping room code -> approximate coordinates on the SVG viewBox
@@ -15,10 +16,14 @@ export const roomIndex = {
 
 // Route computation removed: we only render markers (no path/line and no related calculations)
 
+// Global cache for overlay data (outside component to persist across re-renders)
+const overlayCache = {};
+
 // Minimal XML path extractor for a subset of elements; for static display only
 // Note: Full generic SVG parsing is complex. Here we draw only a background and demo overlay.
 export default function MapViewer({
-  svgAssetModule = require('../assets/bygninger/stueetage_kl_9_cbs_porcelanshaven_2.svg'),
+  svgAssetModule = null,
+  buildingId,
   width = 350,
   height = 520,
   highlightRoom,
@@ -28,8 +33,9 @@ export default function MapViewer({
   debugLabels = false,
   debugWalls = false,
   autoFitOnChange = false,
+  skipWallScanning = false, // New prop to skip expensive wall scanning
 }) {
-  const ENABLE_DEBUG_LOGS = false;
+  const ENABLE_DEBUG_LOGS = false; // Disable debug for better performance
   const zoomRef = useRef(null);
   const [svgString, setSvgString] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -78,6 +84,18 @@ export default function MapViewer({
     return vbw / Math.max(1, width);
   }, [overlayViewBox, width]);
   const U = (px) => Math.max(1, px * pxToUnits);
+
+  // Lightweight, deterministic hash (FNV-1a 32-bit) for cache keying
+  const hashString = (str) => {
+    let h = 0x811c9dc5;
+    for (let i = 0; i < str.length; i++) {
+      h ^= str.charCodeAt(i);
+      // 32-bit FNV prime 16777619
+      h += (h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24);
+    }
+    // Convert to unsigned hex
+    return (h >>> 0).toString(16);
+  };
 
   // Imperative zoom helper: zoom around the center by a factor
   const zoomBy = (factor = 1.2) => {
@@ -140,17 +158,115 @@ export default function MapViewer({
     };
   }, [svgAssetModule]);
 
-  // --- Lightweight SVG scanner ---
+  // --- Lightweight SVG scanner with automatic building processing ---
   useEffect(() => {
-    if (!svgString || svgString.trim().length === 0) {
-      setIsScanning(false);
-      setDetected({ doors: [], corridors: [], entrances: [], rooms: [], walls: [] });
-      setComputed({ buildingBounds: null, roomBoxes: [], filteredWalls: [] });
-      return;
-    }
-    setIsScanning(true);
+    let cancelled = false;
+    const runScan = async () => {
+      // Skip if already scanning or no SVG content
+      if (isScanning) {
+        console.log('🔄 Scan already in progress, skipping...');
+        return;
+      }
+      
+      if (!svgString || svgString.trim().length === 0) {
+        if (cancelled) return;
+        setIsScanning(false);
+        setDetected({ doors: [], corridors: [], entrances: [], rooms: [], walls: [] });
+        setComputed({ buildingBounds: null, roomBoxes: [], filteredWalls: [] });
+        return;
+      }
+      setIsScanning(true);
+      console.log('🔄 Starting scan for:', detectedBuildingId || 'unknown');
 
-    // Helpers
+      // Use the buildingId prop if provided, otherwise try to extract from asset path
+      let detectedBuildingId = buildingId;
+      let isFromRawBygninger = false;
+      
+      if (detectedBuildingId) {
+        // Check if the buildingId corresponds to a processed building by checking the asset path
+        const assetPath = svgAssetModule?.toString() || '';
+        console.log('📁 Asset path:', assetPath);
+        
+        if (assetPath.includes('scannedebyggninger')) {
+          isFromRawBygninger = false;
+          console.log('✅ Using processed building:', detectedBuildingId);
+        } else {
+          isFromRawBygninger = true;
+          console.log('🆕 Processing raw building:', detectedBuildingId);
+        }
+      } else {
+        // Fallback to old method if no buildingId prop
+        try {
+          const assetPath = svgAssetModule?.toString() || '';
+          console.log('📁 Asset path:', assetPath);
+          
+          // Check if loading from processed scannedebyggninger
+          const scannedMatch = assetPath.match(/scannedebyggninger\/([^\/]+)\/floorplan\.svg/);
+          if (scannedMatch) {
+            detectedBuildingId = scannedMatch[1];
+            isFromRawBygninger = false;
+            console.log('✅ Detected processed building:', detectedBuildingId);
+          } else {
+            // Check if loading from raw bygninger
+            const rawMatch = assetPath.match(/bygninger\/([^\/]+)\.svg/);
+            if (rawMatch) {
+              detectedBuildingId = rawMatch[1];
+              isFromRawBygninger = true;
+              console.log('🆕 Detected raw building:', detectedBuildingId);
+            } else {
+              console.log('❓ Could not determine building ID from path');
+            }
+          }
+        } catch (e) {
+          console.log('❌ Error extracting building ID:', e);
+        }
+      }
+
+      // If loading from processed scannedebyggninger, try to load cached overlay
+      if (detectedBuildingId && !isFromRawBygninger) {
+        // First check memory cache
+        if (overlayCache[detectedBuildingId]) {
+          console.log('⚡ Loading from memory cache:', detectedBuildingId);
+          const cached = overlayCache[detectedBuildingId];
+          if (cancelled) return;
+          setDetected(cached || { doors: [], corridors: [], entrances: [], rooms: [], walls: [], floors: [] });
+          setIsScanning(false);
+          return;
+        }
+        
+        // Then try file system cache
+        const baseDir = FileSystem.documentDirectory || FileSystem.cacheDirectory || '';
+        if (baseDir) {
+          const overlayPath = `${baseDir}scannedebyggninger/${detectedBuildingId}/overlay.json`;
+          try {
+            const txt = await readAsStringAsync(overlayPath);
+            const cached = JSON.parse(txt);
+            const versionOk = Number(cached?.version) === 3;
+            if (versionOk) {
+              console.log('⚡ Loading from file cache:', detectedBuildingId);
+              if (cancelled) return;
+              setDetected(cached.detected || { doors: [], corridors: [], entrances: [], rooms: [], walls: [], floors: [] });
+              setIsScanning(false);
+              return;
+            }
+          } catch {
+            // No file cache found, will perform scan
+          }
+        }
+      }
+      
+      // Also check if we have this building cached already (even for raw buildings)
+      if (detectedBuildingId && overlayCache[detectedBuildingId]) {
+        console.log('⚡ Loading from memory cache:', detectedBuildingId);
+        const cached = overlayCache[detectedBuildingId];
+        if (cancelled) return;
+        setDetected(cached || { doors: [], corridors: [], entrances: [], rooms: [], walls: [], floors: [] });
+        setIsScanning(false);
+        return;
+      }
+
+      // Perform full scan (either first time for raw building, or cache miss)
+      // Helpers
     const decodeEntities = (str) => {
       if (!str) return '';
       return String(str)
@@ -506,6 +622,104 @@ export default function MapViewer({
   const fillCounts = new Map();
   const bumpMap = (map, key) => { if (!key) return; map.set(key, (map.get(key) || 0) + 1); };
 
+    // Always capture walls on the first scan so toggling "Vægge" later doesn't require rescanning
+  // Scanning options - disable wall scanning for better performance
+    const wantWalls = false; // Never scan walls - focus only on rooms and entrances
+    const isLargeFile = svgString.length > 2000000; // 2MB threshold for ultra-simple scanning
+    console.log('⚡ Performance mode: rooms and entrances only', isLargeFile ? '(ultra-fast mode for large file)' : '(no walls)');
+
+    // For very large files, use ultra-fast mode that only scans text elements
+    if (isLargeFile) {
+      console.log('🚀 Ultra-fast scan: only processing styled text elements (room numbers)');
+      const rooms = [];
+      const entrances = [];
+      
+      // Only scan for text elements with specific styling (room numbers)
+      const textRegex = /<\s*text\b([^>]*)>([\s\S]*?)<\s*\/text\s*>/gi;
+      let tx;
+      let processedTexts = 0;
+      const maxTexts = 1000; // Limit processing to prevent hanging
+      
+      while ((tx = textRegex.exec(svgString)) && processedTexts < maxTexts) {
+        processedTexts++;
+        const attrsRaw = tx[1] || '';
+        const inner = tx[2] || '';
+        const a = parseAttributes(`<text ${attrsRaw} />`);
+        
+        // Simple coordinate extraction (no complex transforms)
+        const x = parseFloat(a.x || '0');
+        const y = parseFloat(a.y || '0');
+        
+        if (isFinite(x) && isFinite(y)) {
+          // Extract text content and clean it
+          let text = inner.replace(/<[^>]*>/g, '').trim();
+          if (!text) {
+            // Check for tspan content
+            const tspanMatch = inner.match(/<\s*tspan[^>]*>(.*?)<\s*\/tspan\s*>/i);
+            if (tspanMatch) {
+              text = tspanMatch[1].trim();
+            }
+          }
+          
+          if (text && text.length > 0 && text.length < 10) { // Room numbers are usually short
+            // Check styling to filter for room numbers
+            const style = a.style || '';
+            const fill = a.fill || '';
+            const fontSize = parseFloat(a['font-size'] || '0');
+            
+            // Look for blue-ish colors and reasonable font sizes
+            const isBlueish = /blue|#[0-9a-f]*[0-9][0-9a-f]*|#[0-9a-f]*[4-9a-f][0-9a-f]*|fill:\s*#[0-9a-f]*[0-9][0-9a-f]*/i.test(style + ' ' + fill);
+            const hasGoodSize = fontSize > 8 && fontSize < 50; // Reasonable font size range
+            
+            // Check if it looks like a room number (letters + numbers, or just numbers)
+            const isRoomNumber = /^[A-Z]?[\d]+[\.\d]*[A-Z]?$/i.test(text) || 
+                                /^[\d]+[A-Z]?$/i.test(text) ||
+                                /^[A-Z][\d]+$/i.test(text);
+            
+            // Only include if it has the right styling and format
+            if (isRoomNumber && (isBlueish || hasGoodSize || text.match(/^\d+$/))) {
+              rooms.push({ x, y, text, id: text });
+              console.log(`📍 Found room: ${text} at (${Math.round(x)}, ${Math.round(y)})`);
+            }
+          }
+        }
+        
+        // Progress indicator for very large files
+        if (processedTexts % 200 === 0) {
+          console.log(`🔄 Processed ${processedTexts} text elements...`);
+        }
+      }
+      
+      // Skip entrance detection for now to keep it ultra-fast
+      console.log(`⚡ Ultra-fast scan complete: ${rooms.length} room numbers found (processed ${processedTexts} text elements)`);
+      
+      const detectedOut = { doors: [], corridors: [], entrances, rooms, walls: [], floors: [] };
+      if (!cancelled) setDetected(detectedOut);
+      
+      console.log('🔍 Detection results:', {
+        doors: 0,
+        corridors: 0,
+        entrances: entrances.length,
+        floors: 0,
+        rooms: rooms.length,
+        walls: 0,
+        buildingId: detectedBuildingId,
+        isFromRawBygninger
+      });
+      
+      // Save to cache
+      overlayCache[detectedBuildingId] = detectedOut;
+      console.log(`✅ Cached overlay for ${detectedBuildingId} in memory`);
+      console.log(`📊 Scan results: doors:0, corridors:0, entrances:${entrances.length}, rooms:${rooms.length}, walls:0, floors:0`);
+      
+      if (isFromRawBygninger) {
+        console.log(`🚀 Building ${detectedBuildingId} ready for production`);
+      }
+      
+      if (!cancelled) setIsScanning(false);
+      return;
+    }
+
     // Basic path parser for M/L/H/V/Z commands only
     const parsePathToSegments = (d) => {
       if (!d) return [];
@@ -639,19 +853,21 @@ export default function MapViewer({
         const maxX = Math.max(pTL.x, pTR.x, pBR.x, pBL.x);
         const maxY = Math.max(pTL.y, pTR.y, pBR.y, pBL.y);
     floors.push({ minX, minY, maxX, maxY, source: 'rect' });
-    // Also push the rectangle outline as walls to strengthen navigation boundaries
-    const floorStroke = '#d9e2e8';
-    const fd = 0;
-    walls.push({ x1: pTL.x, y1: pTL.y, x2: pTR.x, y2: pTR.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
-    walls.push({ x1: pTR.x, y1: pTR.y, x2: pBR.x, y2: pBR.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
-    walls.push({ x1: pBR.x, y1: pBR.y, x2: pBL.x, y2: pBL.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
-    walls.push({ x1: pBL.x, y1: pBL.y, x2: pTL.x, y2: pTL.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
+  // Optionally push the rectangle outline as walls (capture on first scan)
+  if (wantWalls) {
+      const floorStroke = '#d9e2e8';
+      const fd = 0;
+      walls.push({ x1: pTL.x, y1: pTL.y, x2: pTR.x, y2: pTR.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
+      walls.push({ x1: pTR.x, y1: pTR.y, x2: pBR.x, y2: pBR.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
+      walls.push({ x1: pBR.x, y1: pBR.y, x2: pBL.x, y2: pBL.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
+      walls.push({ x1: pBL.x, y1: pBL.y, x2: pTL.x, y2: pTL.y, source: 'floor-rect', strokeColor: floorStroke, strokeWidth: 2, colorDelta: fd, floorDerived: true });
+    }
       }
 
       // Walls by stroke color on rectangles (rare, but keep for completeness)
   const stroke = getStrokeColor(a, tagPos);
   const sw = getStrokeWidth(a, tagPos, M);
-      if (isWallStroke(stroke, sw)) {
+    if (wantWalls && isWallStroke(stroke, sw)) {
         // Represent rect border as 4 segments
         const cd = colorDeltaToFloor(stroke);
         walls.push({ x1: pTL.x, y1: pTL.y, x2: pTR.x, y2: pTR.y, source: 'rect', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
@@ -679,7 +895,7 @@ export default function MapViewer({
       const p2 = applyTransform({ x: x2, y: y2 }, M);
   const stroke = getStrokeColor(a, tagPos);
   const sw = getStrokeWidth(a, tagPos, M);
-      if (isWallStroke(stroke, sw)) {
+    if (wantWalls && isWallStroke(stroke, sw)) {
         const cd = colorDeltaToFloor(stroke);
         walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'line', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
       }
@@ -713,7 +929,7 @@ export default function MapViewer({
 
   const stroke = getStrokeColor(a, tagPos);
   const sw = getStrokeWidth(a, tagPos, M);
-      if (isWallStroke(stroke, sw)) {
+      if (debugWalls && isWallStroke(stroke, sw)) {
         // polyline broken into segments
         for (let i = 1; i < pts.length; i++) {
           const p1 = pts[i - 1];
@@ -770,31 +986,36 @@ export default function MapViewer({
         let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
         for (const p of pts) { minX = Math.min(minX, p.x); minY = Math.min(minY, p.y); maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y); }
         if (isFinite(minX)) floors.push({ minX, minY, maxX, maxY, source: 'polygon' });
-        // Add polygon edges as walls
-        for (let i = 0; i < pts.length; i++) {
-          const aPt = pts[i];
-          const bPt = pts[(i + 1) % pts.length];
-          walls.push({ x1: aPt.x, y1: aPt.y, x2: bPt.x, y2: bPt.y, source: 'floor-polygon' });
+  // Add polygon edges as walls
+  if (wantWalls) {
+          for (let i = 0; i < pts.length; i++) {
+            const aPt = pts[i];
+            const bPt = pts[(i + 1) % pts.length];
+            walls.push({ x1: aPt.x, y1: aPt.y, x2: bPt.x, y2: bPt.y, source: 'floor-polygon' });
+          }
         }
       }
     }
 
-    // Scan <path ...> for green fill (entrances) and extract rough centroid from M/L pairs
+    // Scan <path ...> for green fill (entrances) and floor bounds, and treat wall-like strokes as walls when debugging
     const pathRegex = /<\s*path\b[^>]*>/gi;
     let ph;
     while ((ph = pathRegex.exec(svgString))) {
       const tag = ph[0];
       const tagPos = ph.index;
       const a = parseAttributes(tag);
+      // Compose parent <g> transform with element's own transform
+      const Mparent = computeGroupTransformAt(tagPos);
+      const M = multT(Mparent, parseTransform(a.transform));
   const fill = getFillColor(a, tagPos);
   const stroke = getStrokeColor(a, tagPos);
-  const sw = getStrokeWidth(a, tagPos);
-  bumpMap(fillCounts, fill); bumpMap(strokeCounts, stroke);
-  // Compose parent <g> transform with element's own transform
-  const Mparent = computeGroupTransformAt(tagPos);
-  const M = multT(Mparent, parseTransform(a.transform));
-      if (isWallStroke(stroke, sw)) {
-        // treat as wall segments
+  const sw = getStrokeWidth(a, tagPos, M);
+      // Optional histograms
+      bumpMap(fillCounts, fill);
+      bumpMap(strokeCounts, stroke);
+
+  // Wall-like strokes on paths (capture on first scan)
+  if (wantWalls && isWallStroke(stroke, sw)) {
         const segs = parsePathToSegments(a.d || '');
         for (const s of segs) {
           const p1 = applyTransform({ x: s.x1, y: s.y1 }, M);
@@ -803,7 +1024,9 @@ export default function MapViewer({
           walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'path', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
         }
       }
-  if (isEntranceGreen(fill) && a.d) {
+
+      // Entrance detection by green fill centroid
+      if (isEntranceGreen(fill) && a.d) {
         // Extract number pairs from d (only M/L approximated)
         const pairRegex = /(-?\d*\.?\d+)[ ,](-?\d*\.?\d+)/g;
         let m;
@@ -830,12 +1053,14 @@ export default function MapViewer({
           maxX = Math.max(maxX, p1.x, p2.x); maxY = Math.max(maxY, p1.y, p2.y);
         }
         if (isFinite(minX)) floors.push({ minX, minY, maxX, maxY, source: 'path' });
-        // Add each segment of the path as a wall
-        for (const s of segs) {
-          const p1 = applyTransform({ x: s.x1, y: s.y1 }, M);
-          const p2 = applyTransform({ x: s.x2, y: s.y2 }, M);
-          const floorStroke = '#d9e2e8';
-          walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'floor-path', strokeColor: floorStroke, strokeWidth: 2, colorDelta: 0, floorDerived: true });
+  // Add each segment of the path as a wall when capturing first scan
+  if (wantWalls) {
+          for (const s of segs) {
+            const p1 = applyTransform({ x: s.x1, y: s.y1 }, M);
+            const p2 = applyTransform({ x: s.x2, y: s.y2 }, M);
+            const floorStroke = '#d9e2e8';
+            walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'floor-path', strokeColor: floorStroke, strokeWidth: 2, colorDelta: 0, floorDerived: true });
+          }
         }
       }
     }
@@ -923,10 +1148,21 @@ export default function MapViewer({
         rooms.push({ id: raw, x, y });
       }
     }
-
     // Note: Full <path> parsing with transforms is not handled here.
 
-  setDetected({ doors, corridors, entrances, rooms, walls, floors });
+    const detectedOut = { doors, corridors, entrances, rooms, walls, floors };
+    console.log('🔍 Detection results:', {
+      doors: doors.length,
+      corridors: corridors.length,
+      entrances: entrances.length,
+      rooms: rooms.length,
+      walls: walls.length,
+      floors: floors.length,
+      buildingId: detectedBuildingId,
+      isFromRawBygninger
+    });
+    
+    if (!cancelled) setDetected(detectedOut);
     // Debug summary
     try {
       if (ENABLE_DEBUG_LOGS) {
@@ -944,8 +1180,64 @@ export default function MapViewer({
         });
       }
     } catch {}
-    setIsScanning(false);
-  }, [svgString, rootViewBox]);
+    // Persist overlay to app documents and handle building processing
+    try {
+      console.log('💾 Saving overlay for:', detectedBuildingId);
+      if (detectedBuildingId) {
+        const payload = JSON.stringify({ 
+          version: 3, 
+          buildingId: detectedBuildingId, 
+          savedAt: Date.now(), 
+          detected: detectedOut,
+          isFromRawBygninger 
+        }, null, 2);
+        
+        // Try to save to file system, but don't fail if it doesn't work
+        let savedToFile = false;
+        try {
+          // Get proper base directory for the platform
+          let baseDir = FileSystem.documentDirectory;
+          if (!baseDir) {
+            baseDir = FileSystem.cacheDirectory;
+          }
+          
+          if (baseDir && baseDir.trim() !== '') {
+            console.log('📂 Using base directory:', baseDir);
+            const overlayDir = `${baseDir}scannedebyggninger/${detectedBuildingId}`;
+            const overlayPath = `${overlayDir}/overlay.json`;
+            
+            await makeDirectoryAsync(overlayDir, { intermediates: true });
+            await writeAsStringAsync(overlayPath, payload);
+            console.log(`✅ Saved overlay for ${detectedBuildingId} to file system`);
+            savedToFile = true;
+          }
+        } catch (fileError) {
+          console.log('ℹ️ File system save failed (using memory cache):', fileError.message);
+        }
+        
+        // Store in memory cache for immediate future use
+        overlayCache[detectedBuildingId] = detectedOut;
+        console.log(`✅ Cached overlay for ${detectedBuildingId} in memory`);
+        
+        console.log(`📊 Scan results: ${Object.keys(detectedOut).map(k => `${k}:${detectedOut[k].length}`).join(', ')}`);
+        
+        // If this was processed from raw bygninger, it's now ready to be moved to processed
+        if (isFromRawBygninger) {
+          console.log(`🚀 Building ${detectedBuildingId} ready for production`);
+        }
+      } else {
+        console.log('❌ No building ID found, cannot save overlay');
+      }
+    } catch (e) {
+      console.warn('Failed to save overlay:', e);
+    }
+    if (!cancelled) setIsScanning(false);
+    };
+    runScan();
+    return () => {
+      cancelled = true;
+    };
+  }, [svgString, rootViewBox, debugWalls]);
 
   // --- Compute building bounds, room boxes, and filtered walls ---
   useEffect(() => {

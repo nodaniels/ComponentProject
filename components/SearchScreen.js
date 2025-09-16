@@ -1,8 +1,8 @@
 
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { View, Text, TextInput, Button, Alert, TouchableOpacity } from 'react-native';
 import styles from './styles';
-import MapViewer from './MapViewer';
+import PDFViewer from './PDFViewer';
 
 
 const SearchScreen = ({ navigation, route }) => {
@@ -10,9 +10,6 @@ const SearchScreen = ({ navigation, route }) => {
   const [committed, setCommitted] = useState('');
   const [matchInfo, setMatchInfo] = useState({ count: 0, ids: [] });
   const [matchIndex, setMatchIndex] = useState(0);
-  const [debugWalls, setDebugWalls] = useState(false);
-  const [debugLabels, setDebugLabels] = useState(false);
-  
 
   const runSearch = () => {
     const q = (search || '').trim();
@@ -21,16 +18,26 @@ const SearchScreen = ({ navigation, route }) => {
     setMatchIndex(0);
   };
 
+  // Use useCallback to prevent onMatchChange from being recreated on every render
+  const handleMatchChange = useCallback((rooms) => {
+    if (rooms && Array.isArray(rooms)) {
+      const count = rooms.length;
+      const ids = rooms.map(room => room.id || room.text);
+      setMatchInfo({ count, ids });
+    }
+  }, []); // Empty dependency array to prevent recreation
+
   // Prefer selected SVG from route; else use first entry from generated buildings list; fallback to a known file.
-  let generatedList = null;
-  try {
-    // eslint-disable-next-line global-require
-    const mod = require('./buildings.generated');
-    generatedList = mod?.BUILDINGS || mod?.default || null;
-  } catch {}
-  const svgAssetModule = route?.params?.svgAssetModule
-    || (generatedList && generatedList.length ? generatedList[0].svg : null)
-    || require('../assets/bygninger/stueetage_kl_9_cbs_porcelanshaven_2.svg');
+  // Get building information from route params
+  const buildingId = route?.params?.buildingId || 'unknown';
+  const fileType = route?.params?.fileType || 'pdf';
+  const fileName = route?.params?.fileName || null;
+
+  // Load the PDF asset based on known files
+  let pdfAssetModule = null;
+  if (fileName && fileName.includes('stueetage_kl_9_cbs_porcelanshaven_21')) {
+    pdfAssetModule = require('../assets/bygninger/stueetage_kl_9_cbs_porcelanshaven_21.pdf');
+  }
 
   return (
     <View style={styles.container}>
@@ -42,21 +49,6 @@ const SearchScreen = ({ navigation, route }) => {
         onChangeText={setSearch}
       />
       <Button title="Søg" onPress={runSearch} style={styles.button} />
-
-      {/* Debug toggles */}
-      <View style={{ marginTop: 10, alignItems: 'center' }}>
-        <View style={{ flexDirection: 'row', gap: 8 }}>
-          <TouchableOpacity onPress={() => setDebugWalls((v) => !v)} style={{ paddingHorizontal: 10, paddingVertical: 6, backgroundColor: debugWalls?'#ffe3f0':'#eee', borderRadius: 6 }}>
-            <Text>Vægge</Text>
-          </TouchableOpacity>
-          <TouchableOpacity onPress={() => setDebugLabels((v) => !v)} style={{ paddingHorizontal: 10, paddingVertical: 6, backgroundColor: debugLabels?'#e8eaff':'#eee', borderRadius: 6 }}>
-            <Text>Labels</Text>
-          </TouchableOpacity>
-        </View>
-        <TouchableOpacity onPress={() => setMatchInfo((m) => ({ ...m }))} style={{ display: 'none' }}>
-          <Text />
-        </TouchableOpacity>
-      </View>
 
       {/* Match feedback + navigation */}
       <View style={{ marginTop: 10, alignItems: 'center' }}>
@@ -90,15 +82,13 @@ const SearchScreen = ({ navigation, route }) => {
         ) : null}
       </View>
       <View style={styles.mapContainer}>
-        <MapViewer
-          svgAssetModule={svgAssetModule}
-          width={350}
-          height={480}
-          highlightRoom={committed}
-          onMatchChange={(info) => setMatchInfo(info)}
-          matchIndex={Math.min(Math.max(0, matchIndex), Math.max(0, matchInfo.count - 1))}
-          debugLabels={debugLabels}
-          debugWalls={debugWalls}
+        <PDFViewer
+          buildingId={buildingId}
+          fileName={fileName}
+          fileType={fileType}
+          pdfAssetModule={pdfAssetModule}
+          searchText={committed}
+          onMatchChange={handleMatchChange}
         />
       </View>
     </View>
