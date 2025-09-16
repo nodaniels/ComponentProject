@@ -1,15 +1,28 @@
 import React from 'react';
 import { View, Text, FlatList, TouchableOpacity } from 'react-native';
 import styles from './styles';
+
 let BUILDINGS;
 try {
-  // Load buildings from generated list (PDF files)
-  // eslint-disable-next-line global-require
-  BUILDINGS = require('../assets/buildings').default;
+  // Load buildings with floors support
+  BUILDINGS = require('../assets/buildings-with-floors').default;
 } catch (e) {
-  // Fallback to empty list if no buildings file exists
-  console.warn('No buildings.js found, run: node scripts/generate-buildings.js');
-  BUILDINGS = [];
+  // Fallback to old structure if new file doesn't exist
+  try {
+    BUILDINGS = require('../assets/buildings').default.map(building => ({
+      id: building.id,
+      name: building.name,
+      floors: [{
+        id: 'default',
+        name: 'Etage',
+        pdfFile: building.pdfFile,
+        pdfModule: null // Will be handled in SearchScreen
+      }]
+    }));
+  } catch (e2) {
+    console.warn('No buildings found');
+    BUILDINGS = [];
+  }
 }
 
 const SelectBuildingScreen = ({ navigation }) => {
@@ -29,8 +42,8 @@ const SelectBuildingScreen = ({ navigation }) => {
       }}
       onPress={() => navigation.navigate('Search', { 
         buildingId: item.id,
-        fileType: item.type,
-        fileName: item.pdfFile
+        buildingName: item.name,
+        floors: item.floors
       })}
     >
       <Text style={{ fontSize: 16 }}>{item.name}</Text>

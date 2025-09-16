@@ -5,7 +5,7 @@ import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
 import Svg, { Circle } from 'react-native-svg';
 
-const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText, onMatchChange, currentMatchIndex = 0 }) => {
+const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText, onMatchChange, currentMatchIndex = 0, entranceCoordinates = null }) => {
   const [isLoading, setIsLoading] = useState(false);
   const [allRooms, setAllRooms] = useState([]); // Store all rooms but don't show by default
   const [allEntrances, setAllEntrances] = useState([]); // Store all entrances
@@ -295,16 +295,39 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
   // Load PDF when component mounts or props change
   useEffect(() => {
     const loadPDF = async () => {
-      if (!pdfAssetModule || !fileName) {
+      if (!fileName) {
         setError('No PDF file provided');
         return;
+      }
+
+      // Handle both new structure (with pdfModule) and old structure (dynamic require)
+      let assetModule = pdfAssetModule;
+      if (!assetModule) {
+        // Fallback: try to dynamically require the PDF
+        try {
+          if (fileName.includes('stueetage_kl_9_cbs_porcelanshaven_21')) {
+            assetModule = require('../assets/bygninger/porcelaenshaven/stueetage_kl_9_cbs_porcelanshaven_21.pdf');
+          } else if (fileName.includes('porcelaenshaven_1._sal_pdf_1')) {
+            assetModule = require('../assets/bygninger/porcelaenshaven/porcelaenshaven_1._sal_pdf_1 (1).pdf');
+          } else if (fileName.includes('121128-02_2_sal_kl_9_cbs_porcelaenshaven')) {
+            assetModule = require('../assets/bygninger/porcelaenshaven/121128-02_2_sal_kl_9_cbs_porcelaenshaven.pdf');
+          } else if (fileName.includes('stueetage_cbs_kilen_1')) {
+            assetModule = require('../assets/bygninger/stueetage_cbs_kilen_1.pdf');
+          } else {
+            setError(`PDF file ${fileName} not found`);
+            return;
+          }
+        } catch (e) {
+          setError(`Could not load PDF: ${fileName}`);
+          return;
+        }
       }
 
       setIsLoading(true);
       setError(null);
       
       try {
-        const asset = Asset.fromModule(pdfAssetModule);
+        const asset = Asset.fromModule(assetModule);
         await asset.downloadAsync();
         const uri = asset.localUri || asset.uri;
         
@@ -432,11 +455,11 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
                 />
               ))}
               
-              {/* Show nearest entrance when searching and found */}
-              {searchText && nearestEntrance && (
+              {/* Show nearest entrance when searching and found, or use provided entrance coordinates */}
+              {searchText && (nearestEntrance || entranceCoordinates) && (
                 <Circle
-                  cx={nearestEntrance.x}
-                  cy={nearestEntrance.y}
+                  cx={entranceCoordinates ? entranceCoordinates.x : nearestEntrance.x}
+                  cy={entranceCoordinates ? entranceCoordinates.y : nearestEntrance.y}
                   r={8}
                   fill="#FF9800"
                   stroke="#F57C00"
