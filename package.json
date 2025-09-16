@@ -3,9 +3,15 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
+    "gen:buildings": "node scripts/generate-buildings.js",
+    "gen:buildings:watch": "node scripts/generate-buildings.js --watch",
+    "prestart": "npm run gen:buildings",
     "start": "expo start",
+    "preandroid": "npm run gen:buildings",
     "android": "expo start --android",
+    "preios": "npm run gen:buildings",
     "ios": "expo start --ios",
+    "preweb": "npm run gen:buildings",
     "web": "expo start --web"
   },
   "dependencies": {

@@ -5,7 +5,7 @@ import styles from './styles';
 import MapViewer from './MapViewer';
 
 
-const SearchScreen = ({ navigation }) => {
+const SearchScreen = ({ navigation, route }) => {
   const [search, setSearch] = useState('');
   const [committed, setCommitted] = useState('');
   const [matchInfo, setMatchInfo] = useState({ count: 0, ids: [] });
@@ -20,6 +20,17 @@ const SearchScreen = ({ navigation }) => {
     // Reset selection for a new query
     setMatchIndex(0);
   };
+
+  // Prefer selected SVG from route; else use first entry from generated buildings list; fallback to a known file.
+  let generatedList = null;
+  try {
+    // eslint-disable-next-line global-require
+    const mod = require('./buildings.generated');
+    generatedList = mod?.BUILDINGS || mod?.default || null;
+  } catch {}
+  const svgAssetModule = route?.params?.svgAssetModule
+    || (generatedList && generatedList.length ? generatedList[0].svg : null)
+    || require('../assets/bygninger/stueetage_kl_9_cbs_porcelanshaven_2.svg');
 
   return (
     <View style={styles.container}>
@@ -80,6 +91,7 @@ const SearchScreen = ({ navigation }) => {
       </View>
       <View style={styles.mapContainer}>
         <MapViewer
+          svgAssetModule={svgAssetModule}
           width={350}
           height={480}
           highlightRoom={committed}

@@ -18,7 +18,7 @@ export const roomIndex = {
 // Minimal XML path extractor for a subset of elements; for static display only
 // Note: Full generic SVG parsing is complex. Here we draw only a background and demo overlay.
 export default function MapViewer({
-  svgAssetModule = require('../assets/stueetage_kl_9_cbs_porcelanshaven_2.svg'),
+  svgAssetModule = require('../assets/bygninger/stueetage_kl_9_cbs_porcelanshaven_2.svg'),
   width = 350,
   height = 520,
   highlightRoom,
@@ -33,6 +33,7 @@ export default function MapViewer({
   const zoomRef = useRef(null);
   const [svgString, setSvgString] = useState(null);
   const [loadError, setLoadError] = useState(null);
+  const [isScanning, setIsScanning] = useState(false);
   const [detected, setDetected] = useState({ doors: [], corridors: [], entrances: [], rooms: [], walls: [] });
   const [computed, setComputed] = useState({ buildingBounds: null, roomBoxes: [], filteredWalls: [] });
   // Derive overlay viewBox from the SVG's own viewBox (preferred), else from computed building bounds, else fallback
@@ -142,10 +143,12 @@ export default function MapViewer({
   // --- Lightweight SVG scanner ---
   useEffect(() => {
     if (!svgString || svgString.trim().length === 0) {
+      setIsScanning(false);
       setDetected({ doors: [], corridors: [], entrances: [], rooms: [], walls: [] });
       setComputed({ buildingBounds: null, roomBoxes: [], filteredWalls: [] });
       return;
     }
+    setIsScanning(true);
 
     // Helpers
     const decodeEntities = (str) => {
@@ -178,13 +181,34 @@ export default function MapViewer({
 
     const parseTransform = (t) => {
       if (!t) return { a: 1, b: 0, c: 0, d: 1, e: 0, f: 0 };
-      // Support translate(x[,y]) and matrix(a,b,c,d,e,f)
+      // translate
       const tr = /translate\s*\(\s*(-?\d*\.?\d+)\s*(?:,\s*(-?\d*\.?\d+))?\s*\)/i.exec(t);
       if (tr) {
         const tx = parseFloat(tr[1] || '0');
         const ty = parseFloat(tr[2] || '0');
         return { a: 1, b: 0, c: 0, d: 1, e: tx, f: ty };
       }
+      // scale
+      const sc = /scale\s*\(\s*(-?\d*\.?\d+)\s*(?:,\s*(-?\d*\.?\d+))?\s*\)/i.exec(t);
+      if (sc) {
+        const sx = parseFloat(sc[1] || '1');
+        const sy = parseFloat((sc[2] ?? sc[1]) || '1');
+        return { a: sx, b: 0, c: 0, d: sy, e: 0, f: 0 };
+      }
+      // rotate(angle[,cx,cy])
+      const rot = /rotate\s*\(\s*(-?\d*\.?\d+)\s*(?:,\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+))?\s*\)/i.exec(t);
+      if (rot) {
+        const ang = (parseFloat(rot[1] || '0') * Math.PI) / 180;
+        const cx = parseFloat(rot[2] || '0');
+        const cy = parseFloat(rot[3] || '0');
+        const cos = Math.cos(ang), sin = Math.sin(ang);
+        const R = { a: cos, b: sin, c: -sin, d: cos, e: 0, f: 0 };
+        if (!isFinite(cx) || !isFinite(cy) || (cx === 0 && cy === 0)) return R;
+        const T1 = { a: 1, b: 0, c: 0, d: 1, e: cx, f: cy };
+        const T2 = { a: 1, b: 0, c: 0, d: 1, e: -cx, f: -cy };
+        return multT(multT(T1, R), T2);
+      }
+      // matrix
       const mx = /matrix\s*\(\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)\s*,\s*(-?\d*\.?\d+)\s*\)/i.exec(t);
       if (mx) {
         const [a,b,c,d,e,f] = mx.slice(1).map((n) => parseFloat(n));
@@ -340,7 +364,7 @@ export default function MapViewer({
       const vbw = rootViewBox?.w || 612;
       return vbw / Math.max(1, width);
     })();
-    const getStrokeWidth = (attrs, pos) => {
+    const getStrokeWidth = (attrs, pos, Mcur) => {
       let sw = attrs['stroke-width'] || '';
       if (!sw && attrs.style) {
         const m = /stroke-width\s*:\s*([^;"\s]+)/i.exec(attrs.style);
@@ -352,11 +376,28 @@ export default function MapViewer({
       }
       if (!sw) return 1; // SVG default stroke-width is 1 user unit
       const s = String(sw).trim().toLowerCase();
-      const px = /(-?\d*\.?\d+)\s*px$/.exec(s);
-      const num = /(-?\d*\.?\d+)$/.exec(s);
-      if (px) return parseFloat(px[1]) * pxToUnitsApprox;
-      if (num) return parseFloat(num[1]);
-      return undefined;
+      const m = /(-?\d*\.?\d+)\s*(px|pt|mm|cm|in)?$/.exec(s);
+      if (!m) return undefined;
+      const val = parseFloat(m[1]);
+      const unit = (m[2] || '').toLowerCase();
+      if (!isFinite(val)) return undefined;
+      let pxVal = val;
+      switch (unit) {
+        case 'px': pxVal = val; break;
+        case 'pt': pxVal = val * (96 / 72); break; // 1pt = 1/72in @ 96dpi
+        case 'mm': pxVal = val * (96 / 25.4); break;
+        case 'cm': pxVal = val * (96 / 2.54); break;
+        case 'in': pxVal = val * 96; break;
+        default: return val; // unitless -> already in user units
+      }
+      // Approximate scale from current transform matrix (uniform avg of X/Y)
+      let scaleMul = 1;
+      if (Mcur && isFinite(Mcur.a) && isFinite(Mcur.b) && isFinite(Mcur.c) && isFinite(Mcur.d)) {
+        const sx = Math.hypot(Mcur.a, Mcur.b);
+        const sy = Math.hypot(Mcur.c, Mcur.d);
+        scaleMul = (sx + sy) / 2 || 1;
+      }
+      return pxVal * pxToUnitsApprox * scaleMul;
     };
     const isWallStroke = (stroke, strokeWidthUnits) => {
       // Accept walls that are either:
@@ -609,7 +650,7 @@ export default function MapViewer({
 
       // Walls by stroke color on rectangles (rare, but keep for completeness)
   const stroke = getStrokeColor(a, tagPos);
-  const sw = getStrokeWidth(a, tagPos);
+  const sw = getStrokeWidth(a, tagPos, M);
       if (isWallStroke(stroke, sw)) {
         // Represent rect border as 4 segments
         const cd = colorDeltaToFloor(stroke);
@@ -637,7 +678,7 @@ export default function MapViewer({
       const p1 = applyTransform({ x: x1, y: y1 }, M);
       const p2 = applyTransform({ x: x2, y: y2 }, M);
   const stroke = getStrokeColor(a, tagPos);
-  const sw = getStrokeWidth(a, tagPos);
+  const sw = getStrokeWidth(a, tagPos, M);
       if (isWallStroke(stroke, sw)) {
         const cd = colorDeltaToFloor(stroke);
         walls.push({ x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y, source: 'line', strokeColor: stroke, strokeWidth: sw, colorDelta: cd });
@@ -671,7 +712,7 @@ export default function MapViewer({
         .map(([x, y]) => applyTransform({ x, y }, M));
 
   const stroke = getStrokeColor(a, tagPos);
-  const sw = getStrokeWidth(a, tagPos);
+  const sw = getStrokeWidth(a, tagPos, M);
       if (isWallStroke(stroke, sw)) {
         // polyline broken into segments
         for (let i = 1; i < pts.length; i++) {
@@ -885,7 +926,7 @@ export default function MapViewer({
 
     // Note: Full <path> parsing with transforms is not handled here.
 
-    setDetected({ doors, corridors, entrances, rooms, walls, floors });
+  setDetected({ doors, corridors, entrances, rooms, walls, floors });
     // Debug summary
     try {
       if (ENABLE_DEBUG_LOGS) {
@@ -903,6 +944,7 @@ export default function MapViewer({
         });
       }
     } catch {}
+    setIsScanning(false);
   }, [svgString, rootViewBox]);
 
   // --- Compute building bounds, room boxes, and filtered walls ---
@@ -1239,6 +1281,12 @@ export default function MapViewer({
             <Text style={{ color: '#666', textAlign: 'center' }}>
               Kunne ikke indlæse plantegningen.{loadError ? `\n${loadError}` : ''}
             </Text>
+          </View>
+        )}
+        {isScanning && (
+          <View style={{ position: 'absolute', top: 0, left: 0, right: 0, bottom: 0, alignItems: 'center', justifyContent: 'center', backgroundColor: 'rgba(255,255,255,0.6)' }}>
+            <ActivityIndicator size="large" color="#666" />
+            <Text style={{ marginTop: 8, color: '#666' }}>Scanner plantegning…</Text>
           </View>
         )}
         {/* Overlay */}
