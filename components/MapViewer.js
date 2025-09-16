@@ -13,12 +13,7 @@ export const roomIndex = {
   'B.2.01': { x: 420, y: 180 },
 };
 
-// Simple straight-line route builder from origin to target
-function buildRoute(origin, target) {
-  if (!origin || !target) return null;
-  if (!isFinite(origin.x) || !isFinite(origin.y) || !isFinite(target.x) || !isFinite(target.y)) return null;
-  return [origin, target]; // Return the origin and target points
-}
+// Route computation removed: we only render markers (no path/line and no related calculations)
 
 // Minimal XML path extractor for a subset of elements; for static display only
 // Note: Full generic SVG parsing is complex. Here we draw only a background and demo overlay.
@@ -1038,7 +1033,7 @@ export default function MapViewer({
     } catch {}
   }, [detected.walls, detected.rooms, detected.floors]);
 
-  // Compute route polyline
+  // No route computation – markers only
   // Prefer extracted room centers if available
   const matches = useMemo(() => {
     const res = [];
@@ -1076,382 +1071,83 @@ export default function MapViewer({
   }, [boundedMatches, matches]);
   const target = extractedTarget || (highlightRoom && roomIndex[highlightRoom] ? roomIndex[highlightRoom] : null);
 
-  // --- Door detection around highlighted room by scanning wall gaps ---
-  const [targetDoor, setTargetDoor] = useState(null);
-
-  useEffect(() => {
-    if (!extractedTarget || !detected?.walls?.length) {
-      setTargetDoor(null);
-      return;
-    }
-    const P = extractedTarget; // label center approx
-    const walls = detected.walls;
-
-    // Utility functions
-    const dot = (a, b) => a.x * b.x + a.y * b.y;
-    const clamp01 = (t) => Math.max(0, Math.min(1, t));
-    const distPointToSeg = (pt, a, b) => {
-      const ab = { x: b.x - a.x, y: b.y - a.y };
-      const ap = { x: pt.x - a.x, y: pt.y - a.y };
-      const t = clamp01(dot(ap, ab) / (dot(ab, ab) || 1e-6));
-      const proj = { x: a.x + t * ab.x, y: a.y + t * ab.y };
-      const dx = proj.x - pt.x;
-      const dy = proj.y - pt.y;
-      return Math.hypot(dx, dy);
-    };
-
-    const castRay = (origin, dir) => {
-      // Find nearest intersection point from origin along dir with any wall segment
-      let bestD = Infinity;
-      let bestPt = null;
-      for (const s of walls) {
-        const a = { x: s.x1, y: s.y1 };
-        const b = { x: s.x2, y: s.y2 };
-        const r = dir; // ray direction
-        const v1 = { x: origin.x - a.x, y: origin.y - a.y };
-        const v2 = { x: b.x - a.x, y: b.y - a.y };
-        const cross = (u, v) => u.x * v.y + 0 - u.y * v.x;
-        const denom = cross(r, v2);
-        if (Math.abs(denom) < 1e-6) continue; // parallel
-        const t = cross(v2, v1) / denom; // along ray
-        const u = cross(r, v1) / denom;  // along segment
-        if (t > 0 && u >= 0 && u <= 1) {
-          const pt = { x: origin.x + t * r.x, y: origin.y + t * r.y };
-          if (t < bestD) {
-            bestD = t;
-            bestPt = pt;
-          }
-        }
-      }
-      return bestPt; // null if none
-    };
-
-    // Find approximate box by casting rays up/down/left/right
-    const up = castRay(P, { x: 0, y: -1 });
-    const down = castRay(P, { x: 0, y: 1 });
-    const left = castRay(P, { x: -1, y: 0 });
-    const right = castRay(P, { x: 1, y: 0 });
-    if (!up || !down || !left || !right) {
-      setTargetDoor(null);
-      return;
-    }
-    const xL = left.x, xR = right.x, yT = up.y, yB = down.y;
-
-    // Scan edges for gaps where walls are missing (door opening)
-    const sampleEdgeForGap = (A, B, normal) => {
-      const N = 40; // samples per edge
-      const EPS = 2.0; // how far from edge to check presence of wall (in SVG units)
-      const hasWallAt = (pt) => {
-        // Check if any wall segment is close to this point
-        for (const s of walls) {
-          const a = { x: s.x1, y: s.y1 };
-          const b = { x: s.x2, y: s.y2 };
-          const d = distPointToSeg(pt, a, b);
-          if (d <= EPS) return true;
-        }
-        return false;
-      };
-      const points = [];
-      for (let i = 0; i <= N; i++) {
-        const t = i / N;
-        const p = { x: A.x + (B.x - A.x) * t, y: A.y + (B.y - A.y) * t };
-        // sample slightly inside the room (shift by normal)
-        const q = { x: p.x + normal.x * 1.5, y: p.y + normal.y * 1.5 };
-        const wall = hasWallAt(p) || hasWallAt(q);
-        points.push({ t, wall, p });
-      }
-      // Find longest continuous run with no wall
-      let best = { len: 0, t0: 0, t1: 0 };
-      let cur = null;
-      for (const s of points) {
-        if (!s.wall) {
-          if (!cur) cur = { start: s.t };
-        } else if (cur) {
-          const len = s.t - cur.start;
-          if (len > best.len) best = { len, t0: cur.start, t1: s.t };
-          cur = null;
-        }
-      }
-      if (cur) {
-        const len = 1 - cur.start;
-        if (len > best.len) best = { len, t0: cur.start, t1: 1 };
-      }
-      if (best.len > 0.05) { // threshold length for door opening
-        const midT = (best.t0 + best.t1) / 2;
-        const mid = { x: A.x + (B.x - A.x) * midT, y: A.y + (B.y - A.y) * midT };
-        return mid;
-      }
-      return null;
-    };
-
-    const topDoor = sampleEdgeForGap({ x: xL, y: yT }, { x: xR, y: yT }, { x: 0, y: 1 });
-    const bottomDoor = sampleEdgeForGap({ x: xL, y: yB }, { x: xR, y: yB }, { x: 0, y: -1 });
-    const leftDoor = sampleEdgeForGap({ x: xL, y: yT }, { x: xL, y: yB }, { x: 1, y: 0 });
-    const rightDoor = sampleEdgeForGap({ x: xR, y: yT }, { x: xR, y: yB }, { x: -1, y: 0 });
-
-    const candidates = [topDoor, bottomDoor, leftDoor, rightDoor].filter(Boolean);
-    if (candidates.length) {
-      // Choose the door closest to the label (arbitrary tie-breaker)
-      let best = candidates[0];
-      let bestD = Math.hypot(best.x - P.x, best.y - P.y);
-      for (let i = 1; i < candidates.length; i++) {
-        const c = candidates[i];
-        const d = Math.hypot(c.x - P.x, c.y - P.y);
-        if (d < bestD) { bestD = d; best = c; }
-      }
-      setTargetDoor(best);
-    } else {
-      setTargetDoor(null);
-    }
-  }, [extractedTarget, detected.walls]);
-  // Routing
-  // Visibility-graph shortest path with entrance inset
-  const computedRoute = useMemo(() => {
-    // Choose start and goal points (in SVG units)
-    const goalPt = (targetDoor || target);
-    // Select nearest entrance to goal (inside bounds) or fall back to origin
-    let entranceStart = null;
-    if (goalPt && detected?.entrances?.length) {
-      let best = null; let bestD = Infinity;
-      const ents = computed?.buildingBounds
-        ? detected.entrances.filter((e) => e.x >= computed.buildingBounds.minX && e.x <= computed.buildingBounds.maxX && e.y >= computed.buildingBounds.minY && e.y <= computed.buildingBounds.maxY)
-        : detected.entrances;
-      for (const e of ents) { const d = Math.hypot((e.x - goalPt.x), (e.y - goalPt.y)); if (d < bestD) { bestD = d; best = e; } }
-      if (best) entranceStart = { x: best.x, y: best.y };
-    }
-    const startPtRaw = entranceStart || origin;
-    if (!startPtRaw || !goalPt || !isFinite(startPtRaw.x) || !isFinite(startPtRaw.y) || !isFinite(goalPt.x) || !isFinite(goalPt.y)) return null;
-
-    const walls = computed?.filteredWalls?.length ? computed.filteredWalls : detected.walls || [];
-    if (!walls.length) return [startPtRaw, goalPt];
-
-      // Helpers
-      const bboxOverlap = (ax1, ay1, ax2, ay2, bx1, by1, bx2, by2) => !(ax2 < bx1 || bx2 < ax1 || ay2 < by1 || by2 < ay1);
-      const segIntersect = (a1, a2, b1, b2) => {
-        // Bounding-box early reject
-        const minAx = Math.min(a1.x, a2.x), maxAx = Math.max(a1.x, a2.x);
-        const minAy = Math.min(a1.y, a2.y), maxAy = Math.max(a1.y, a2.y);
-        const minBx = Math.min(b1.x, b2.x), maxBx = Math.max(b1.x, b2.x);
-        const minBy = Math.min(b1.y, b2.y), maxBy = Math.max(b1.y, b2.y);
-        if (!bboxOverlap(minAx, minAy, maxAx, maxAy, minBx, minBy, maxBx, maxBy)) return false;
-        const cross = (u, v) => u.x * v.y - u.y * v.x;
-        const sub = (p, q) => ({ x: p.x - q.x, y: p.y - q.y });
-        const r = sub(a2, a1); const s = sub(b2, b1);
-        const rxs = cross(r, s); const qpxr = cross(sub(b1, a1), r);
-        if (Math.abs(rxs) < 1e-9 && Math.abs(qpxr) < 1e-9) return false; // colinear treated as passable
-        if (Math.abs(rxs) < 1e-9) return false; // parallel
-        const t = cross(sub(b1, a1), s) / rxs;
-        const u = cross(sub(b1, a1), r) / rxs;
-        return t > 0 && t < 1 && u > 0 && u < 1;
-      };
-      const visible = (p, q) => {
-        if (Math.hypot(p.x - q.x, p.y - q.y) < 1e-6) return false;
-        const minX = Math.min(p.x, q.x) - 0.001, maxX = Math.max(p.x, q.x) + 0.001;
-        const minY = Math.min(p.y, q.y) - 0.001, maxY = Math.max(p.y, q.y) + 0.001;
-        for (const w of walls) {
-          // Quick bbox reject against candidate wall
-          if (!bboxOverlap(minX, minY, maxX, maxY, Math.min(w.x1, w.x2), Math.min(w.y1, w.y2), Math.max(w.x1, w.x2), Math.max(w.y1, w.y2))) continue;
-          const A = { x: w.x1, y: w.y1 }; const B = { x: w.x2, y: w.y2 };
-          if (segIntersect(p, q, A, B)) return false;
-        }
-        return true;
-      };
-
-      // Inset start point slightly inside the building if starting from an entrance
-      const insetFromEntrance = (E, G) => {
-        if (!E) return E;
-        const dir = (() => {
-          const vx = G.x - E.x, vy = G.y - E.y; const d = Math.hypot(vx, vy) || 1;
-          return { x: vx / d, y: vy / d };
-        })();
-        const angles = [0, 15, -15, 30, -30, 45, -45, 60, -60];
-        const dists = [6, 10, 14];
-        let best = null;
-        let bestScore = Infinity;
-        const rot = (v, deg) => {
-          const a = (deg * Math.PI) / 180; const ca = Math.cos(a), sa = Math.sin(a);
-          return { x: v.x * ca - v.y * sa, y: v.x * sa + v.y * ca };
-        };
-        const countIntersections = (P, Q) => {
-          let c = 0;
-          const minX = Math.min(P.x, Q.x) - 0.001, maxX = Math.max(P.x, Q.x) + 0.001;
-          const minY = Math.min(P.y, Q.y) - 0.001, maxY = Math.max(P.y, Q.y) + 0.001;
-          for (const w of walls) {
-            if (!bboxOverlap(minX, minY, maxX, maxY, Math.min(w.x1, w.x2), Math.min(w.y1, w.y2), Math.max(w.x1, w.x2), Math.max(w.y1, w.y2))) continue;
-            if (segIntersect(P, Q, { x: w.x1, y: w.y1 }, { x: w.x2, y: w.y2 })) c++;
-          }
-          return c;
-        };
-        for (const deg of angles) {
-          const v = rot(dir, deg);
-          for (const d of dists) {
-            const C = { x: E.x + v.x * d, y: E.y + v.y * d };
-            // Prefer candidates with no wall between E->C and fewer intersections to G
-            const edgeHits = countIntersections(E, C);
-            const toGoalHits = countIntersections(C, G);
-            const score = edgeHits * 100 + toGoalHits * 10 + Math.hypot(C.x - G.x, C.y - G.y) * 0.001;
-            if (edgeHits === 0 && (!best || score < bestScore)) {
-              best = C; bestScore = score;
-            }
-          }
-        }
-        return best || { x: E.x + dir.x * 8, y: E.y + dir.y * 8 };
-      };
-
-      const startPt = entranceStart ? insetFromEntrance(startPtRaw, goalPt) : startPtRaw;
-
-      // If straight is clear, use it
-      if (visible(startPt, goalPt)) return [startPt, goalPt];
-
-      // Collect relevant endpoints: intersecting walls + neighborhoods
-      const b = computed?.buildingBounds;
-      const wallsInBounds = walls.filter((w) => !b || bboxOverlap(Math.min(w.x1,w.x2), Math.min(w.y1,w.y2), Math.max(w.x1,w.x2), Math.max(w.y1,w.y2), b.minX-1, b.minY-1, b.maxX+1, b.maxY+1));
-      const nodes = [];
-      const seen = new Set();
-      const pushNode = (pt) => {
-        if (!isFinite(pt.x) || !isFinite(pt.y)) return;
-        const key = `${Math.round(pt.x*10)},${Math.round(pt.y*10)}`;
-        if (!seen.has(key)) { seen.add(key); nodes.push(pt); }
-      };
-      pushNode(startPt); pushNode(goalPt);
-
-      const addWallEndpoints = (pred) => {
-        for (const w of wallsInBounds) {
-          const a = { x: w.x1, y: w.y1 }, c = { x: w.x2, y: w.y2 };
-          if (!pred || pred(w, a, c)) { pushNode(a); pushNode(c); }
-        }
-      };
-      // Add endpoints of walls intersecting the direct segment
-      const sgMinX = Math.min(startPt.x, goalPt.x), sgMaxX = Math.max(startPt.x, goalPt.x);
-      const sgMinY = Math.min(startPt.y, goalPt.y), sgMaxY = Math.max(startPt.y, goalPt.y);
-      addWallEndpoints((w, a, c) => {
-        if (!bboxOverlap(sgMinX, sgMinY, sgMaxX, sgMaxY, Math.min(w.x1,w.x2), Math.min(w.y1,w.y2), Math.max(w.x1,w.x2), Math.max(w.y1,w.y2))) return false;
-        return segIntersect(startPt, goalPt, a, c);
-      });
-      // Add endpoints within radius around start and goal
-      const D = Math.hypot(goalPt.x - startPt.x, goalPt.y - startPt.y) || 1;
-      const rStart = Math.max(120, Math.min(600, D * 0.35));
-      const rGoal  = Math.max(120, Math.min(600, D * 0.35));
-      addWallEndpoints((w, a, c) => (Math.hypot(a.x - startPt.x, a.y - startPt.y) <= rStart || Math.hypot(c.x - startPt.x, c.y - startPt.y) <= rStart));
-      addWallEndpoints((w, a, c) => (Math.hypot(a.x - goalPt.x, goalPt.y - a.y) <= rGoal || Math.hypot(c.x - goalPt.x, c.y - goalPt.y) <= rGoal));
-
-      // Hard cap nodes; if over, thin by nearest to the line segment
-  const MAX_NODES = 400;
-      if (nodes.length > MAX_NODES) {
-        const lineDist = (p) => {
-          const vx = goalPt.x - startPt.x, vy = goalPt.y - startPt.y;
-          const wx = p.x - startPt.x, wy = p.y - startPt.y;
-          const v2 = vx*vx + vy*vy || 1;
-          const t = Math.max(0, Math.min(1, (wx*vx + wy*vy) / v2));
-          const px = startPt.x + t*vx, py = startPt.y + t*vy;
-          return Math.hypot(p.x - px, p.y - py);
-        };
-        // Keep start+goal and closest to line
-        const core = nodes.slice(2).sort((a,b) => lineDist(a) - lineDist(b)).slice(0, MAX_NODES - 2);
-        const thinned = [startPt, goalPt, ...core];
-        nodes.length = 0; seen.clear();
-        for (const p of thinned) pushNode(p);
-      }
-
-      // Build sparse visibility edges: k-nearest only
-  const K = 10;
-      const edges = Array.from({ length: nodes.length }, () => []);
-      const idxOf = (pt) => nodes.findIndex((n) => Math.abs(n.x - pt.x) < 1e-6 && Math.abs(n.y - pt.y) < 1e-6);
-      let sIdx = idxOf(startPt), gIdx = idxOf(goalPt);
-      // Candidate neighbor indices per node
-      for (let i = 0; i < nodes.length; i++) {
-        // Find K nearest neighbors without sorting all N: do a simple K-select
-        const dists = [];
-        for (let j = 0; j < nodes.length; j++) {
-          if (j === i) continue;
-          const d = Math.hypot(nodes[i].x - nodes[j].x, nodes[i].y - nodes[j].y);
-          if (dists.length < K) {
-            dists.push({ j, d });
-            if (dists.length === K) dists.sort((a,b) => a.d - b.d);
-          } else if (d < dists[dists.length - 1].d) {
-            dists[dists.length - 1] = { j, d };
-            // bubble down last element to keep array sorted
-            let p = dists.length - 1;
-            while (p > 0 && dists[p].d < dists[p-1].d) { const tmp = dists[p-1]; dists[p-1] = dists[p]; dists[p] = tmp; p--; }
-          }
-        }
-        let added = 0;
-        for (const cand of dists) {
-          const a = nodes[i], c = nodes[cand.j];
-          if (visible(a, c)) {
-            edges[i].push({ j: cand.j, w: cand.d });
-            added++;
-            if (added >= K) break;
-          }
-        }
-      }
-      // Dijkstra
-      const dist = new Array(nodes.length).fill(Infinity);
-      const prev = new Array(nodes.length).fill(-1);
-      const used = new Array(nodes.length).fill(false);
-      dist[sIdx] = 0;
-      for (let iter = 0; iter < nodes.length; iter++) {
-        let u = -1, best = Infinity;
-        for (let i = 0; i < nodes.length; i++) if (!used[i] && dist[i] < best) { best = dist[i]; u = i; }
-        if (u === -1) break;
-        if (u === gIdx) break;
-        used[u] = true;
-        for (const e of edges[u]) {
-          if (dist[u] + e.w < dist[e.j]) { dist[e.j] = dist[u] + e.w; prev[e.j] = u; }
-        }
-      }
-      if (isFinite(dist[gIdx])) {
-        const path = [];
-        for (let v = gIdx; v !== -1; v = prev[v]) path.push(nodes[v]);
-        path.reverse();
-        return path;
-      }
-
-      // Fast greedy fallback: step around first blocking wall via its nearer endpoint
-      const path = [startPt];
-      let cur = startPt;
-      const MAX_STEPS = 80;
-      for (let step = 0; step < MAX_STEPS; step++) {
-        if (visible(cur, goalPt)) { path.push(goalPt); return path; }
-        // Find closest intersection along (cur->goal)
-        let bestT = Infinity, bestSeg = null, bestW = null;
-        const r = { x: goalPt.x - cur.x, y: goalPt.y - cur.y };
-        for (const w of wallsInBounds) {
-          const A = { x: w.x1, y: w.y1 }, B = { x: w.x2, y: w.y2 };
-          if (!bboxOverlap(Math.min(cur.x, goalPt.x), Math.min(cur.y, goalPt.y), Math.max(cur.x, goalPt.x), Math.max(cur.y, goalPt.y), Math.min(A.x,B.x), Math.min(A.y,B.y), Math.max(A.x,B.x), Math.max(A.y,B.y))) continue;
-          // Intersection param t along cur->goal
-          const cross = (u, v) => u.x * v.y - u.y * v.x;
-          const v2 = { x: B.x - A.x, y: B.y - A.y };
-          const denom = cross(r, v2);
-          if (Math.abs(denom) < 1e-9) continue;
-          const t = cross({ x: A.x - cur.x, y: A.y - cur.y }, v2) / denom;
-          const u = cross({ x: A.x - cur.x, y: A.y - cur.y }, r) / denom;
-          if (t > 0 && t < 1 && u >= 0 && u <= 1) {
-            if (t < bestT) { bestT = t; bestSeg = { A, B }; bestW = w; }
-          }
-        }
-        if (!bestSeg) break; // shouldn't happen due to earlier visible() test
-        // Choose detour via the closer endpoint to goal that is visible
-        const candPts = [bestSeg.A, bestSeg.B];
-        candPts.sort((a,b) => Math.hypot(a.x - goalPt.x, a.y - goalPt.y) - Math.hypot(b.x - goalPt.x, b.y - goalPt.y));
-        let picked = null;
-        for (const cp of candPts) { if (visible(cur, cp)) { picked = cp; break; } }
-        if (!picked) { picked = candPts[0]; }
-        path.push(picked);
-        cur = picked;
-      }
-      // Last resort: if still not connected, return null to avoid freezing
-      return null;
-  }, [computed.buildingBounds, origin, targetDoor, target, detected.entrances]);
-
-  // Choose a specific entrance as start: nearest entrance to goal if available; else provided origin in-bounds
+  // Choose a specific entrance as start: nearest entrance on the same building as the selected room
   const startPoint = useMemo(() => {
-    const goalPt = targetDoor || target;
+    const goalPt = target;
     if (!goalPt) return null; // only show a start when we actually have a goal
-    // Prefer nearest entrance inside building bounds
-    const ents = computed?.buildingBounds
-      ? (detected?.entrances || []).filter((e) => e.x >= computed.buildingBounds.minX && e.x <= computed.buildingBounds.maxX && e.y >= computed.buildingBounds.minY && e.y <= computed.buildingBounds.maxY)
-      : (detected?.entrances || []);
+    const floors = detected?.floors || [];
+    const entrances = detected?.entrances || [];
+    const pointIn = (p, aabb) => p.x >= aabb.minX && p.x <= aabb.maxX && p.y >= aabb.minY && p.y <= aabb.maxY;
+    const overlap = (a, b) => !(a.maxX < b.minX || b.maxX < a.minX || a.maxY < b.minY || b.maxY < a.minY);
+    if (floors.length > 0) {
+      // Build clusters of overlapping floor AABBs
+      const clusters = [];
+      for (const f of floors) {
+        let merged = false;
+        for (const c of clusters) {
+          if (c.floors.some((g) => overlap(f, g))) {
+            c.floors.push(f);
+            c.bounds.minX = Math.min(c.bounds.minX, f.minX);
+            c.bounds.minY = Math.min(c.bounds.minY, f.minY);
+            c.bounds.maxX = Math.max(c.bounds.maxX, f.maxX);
+            c.bounds.maxY = Math.max(c.bounds.maxY, f.maxY);
+            merged = true;
+            break;
+          }
+        }
+        if (!merged) clusters.push({ floors: [f], bounds: { ...f } });
+        // Merge clusters that now overlap
+        let changed = true;
+        while (changed) {
+          changed = false;
+          for (let i = 0; i < clusters.length; i++) {
+            for (let j = i + 1; j < clusters.length; j++) {
+              if (overlap(clusters[i].bounds, clusters[j].bounds)) {
+                const a = clusters[i], b = clusters[j];
+                a.floors.push(...b.floors);
+                a.bounds = {
+                  minX: Math.min(a.bounds.minX, b.bounds.minX),
+                  minY: Math.min(a.bounds.minY, b.bounds.minY),
+                  maxX: Math.max(a.bounds.maxX, b.bounds.maxX),
+                  maxY: Math.max(a.bounds.maxY, b.bounds.maxY),
+                };
+                clusters.splice(j, 1);
+                changed = true;
+                break;
+              }
+            }
+            if (changed) break;
+          }
+        }
+      }
+      const clusterOf = (p) => {
+        for (let idx = 0; idx < clusters.length; idx++) {
+          const c = clusters[idx];
+          if (!pointIn(p, c.bounds)) continue;
+          if (c.floors.some((f) => pointIn(p, f))) return idx;
+        }
+        return -1;
+      };
+      const goalCluster = clusterOf(goalPt);
+      if (goalCluster >= 0) {
+        const same = entrances.filter((e) => clusterOf(e) === goalCluster);
+        if (same.length) {
+          let best = same[0];
+          let bestD = Math.hypot(best.x - goalPt.x, best.y - goalPt.y);
+          for (let i = 1; i < same.length; i++) {
+            const e = same[i];
+            const d = Math.hypot(e.x - goalPt.x, e.y - goalPt.y);
+            if (d < bestD) { best = e; bestD = d; }
+          }
+          return { x: best.x, y: best.y, __isEntrance: true };
+        }
+        return null;
+      }
+      return null;
+    }
+    // Fallback: choose nearest entrance within building bounds
+    const b = computed?.buildingBounds;
+    const ents = b ? entrances.filter((e) => e.x >= b.minX && e.x <= b.maxX && e.y >= b.minY && e.y <= b.maxY) : entrances;
     if (ents.length) {
       let best = ents[0];
       let bestD = Math.hypot(best.x - goalPt.x, best.y - goalPt.y);
@@ -1462,18 +1158,8 @@ export default function MapViewer({
       }
       return { x: best.x, y: best.y, __isEntrance: true };
     }
-    // Fallback to provided origin only if it lies inside building bounds
-    if (origin && computed?.buildingBounds) {
-      const b = computed.buildingBounds;
-      if (origin.x >= b.minX && origin.x <= b.maxX && origin.y >= b.minY && origin.y <= b.maxY) {
-        return origin;
-      }
-      return null;
-    }
     return null;
-  }, [origin, targetDoor, target, detected.entrances, computed.buildingBounds]);
-
-  const route = computedRoute; // avoid straight-line fallback to prevent off-canvas diagonals
+  }, [target, detected.floors, detected.entrances, computed.buildingBounds]);
   const selectedMatch = useMemo(() => {
     const arr = boundedMatches.length ? boundedMatches : matches;
     if (!arr.length) return null;
@@ -1481,7 +1167,7 @@ export default function MapViewer({
     return arr[idx];
   }, [boundedMatches, matches, matchIndex]);
 
-  // Optional auto-center/fit: when route/start/selected changes
+  // Optional auto-center/fit: when start/selected changes
   useEffect(() => {
     if (!autoFitOnChange) return; // disabled by default
     if (!zoomRef.current) return;
@@ -1489,11 +1175,6 @@ export default function MapViewer({
     const pts = [];
     if (selectedMatch && isFinite(selectedMatch.x) && isFinite(selectedMatch.y)) pts.push({ x: selectedMatch.x, y: selectedMatch.y });
     if (startPoint && isFinite(startPoint.x) && isFinite(startPoint.y)) pts.push({ x: startPoint.x, y: startPoint.y });
-    if (route && route.length) {
-      for (const p of route) {
-        if (p && isFinite(p.x) && isFinite(p.y)) pts.push(p);
-      }
-    }
     if (pts.length === 0) return;
     // Map overlay viewBox units to pre-zoom pixels using preserveAspectRatio
     const vb = overlayViewBox;
@@ -1534,7 +1215,7 @@ export default function MapViewer({
     const tx = (viewW - contentW * nextScale) / 2 - minPx * nextScale;
     const ty = (viewH - contentH * nextScale) / 2 - minPy * nextScale;
     try { zoomRef.current.setTransform({ nextScale, nextTranslateX: tx, nextTranslateY: ty, animate: true, duration: 280 }); } catch {}
-  }, [width, height, overlayViewBox, selectedMatch, startPoint, route, autoFitOnChange]);
+  }, [width, height, overlayViewBox, selectedMatch, startPoint, autoFitOnChange]);
 
   if (svgString === null) {
     return (
@@ -1544,7 +1225,7 @@ export default function MapViewer({
     );
   }
 
-  // Render the actual uploaded SVG, and overlay route/markers using a separate absolute-positioned Svg
+  // Render the actual uploaded SVG, and overlay markers using a separate absolute-positioned Svg
   const canRenderXml = typeof svgString === 'string' && svgString.trim().length > 0;
   return (
     <View style={{ width, height, position: 'relative' }}>
@@ -1657,17 +1338,7 @@ export default function MapViewer({
 
           {/* Detected door marker hidden */}
           {/* No separate start dot; nearest entrance is highlighted with a green ring above */}
-          {/* Route polyline (drawn below markers so dots are visible) */}
-          {route && route.length >= 2 && canRenderXml && route.every(p => isFinite(p.x) && isFinite(p.y)) && (
-            <Polyline
-              points={route.map((p) => `${p.x},${p.y}`).join(' ')}
-              stroke="#27ae60"
-              strokeWidth={U(3)}
-              fill="none"
-              strokeLinejoin="round"
-              strokeLinecap="round"
-            />
-          )}
+          {/* No route polyline rendered */}
           {/* Hide all other room labels/dots */}
           {/* Only selected room marker */}
           {selectedMatch && (
@@ -1684,10 +1355,10 @@ export default function MapViewer({
                   <Polyline points={`${selectedMatch.x},${selectedMatch.y - U(12)} ${selectedMatch.x},${selectedMatch.y + U(12)}`} stroke="#2980b9" strokeWidth={U(1)} />
                 </G>
               )}
-              {(targetDoor || target) && (
+              {target && (
                 <G>
-                  <Polyline points={`${(targetDoor||target).x - U(12)},${(targetDoor||target).y} ${(targetDoor||target).x + U(12)},${(targetDoor||target).y}`} stroke="#27ae60" strokeWidth={U(1)} />
-                  <Polyline points={`${(targetDoor||target).x},${(targetDoor||target).y - U(12)} ${(targetDoor||target).x},${(targetDoor||target).y + U(12)}`} stroke="#27ae60" strokeWidth={U(1)} />
+                  <Polyline points={`${target.x - U(12)},${target.y} ${target.x + U(12)},${target.y}`} stroke="#27ae60" strokeWidth={U(1)} />
+                  <Polyline points={`${target.x},${target.y - U(12)} ${target.x},${target.y + U(12)}`} stroke="#27ae60" strokeWidth={U(1)} />
                 </G>
               )}
               {startPoint && (
