@@ -1,7 +1,7 @@
 import React, { useState, useCallback } from 'react';
 import { View, Text, TextInput, Button, TouchableOpacity } from 'react-native';
 import styles from './styles';
-import PDFViewer from './PDFViewer';
+import ImageViewer from './ImageViewer';
 
 const SearchScreen = ({ navigation, route }) => {
   const [search, setSearch] = useState('');
@@ -245,15 +245,14 @@ const SearchScreen = ({ navigation, route }) => {
       </View>
 
       <View style={styles.mapContainer}>
-        {/* Hidden PDFViewers to preload all floors for cross-floor search */}
+        {/* Hidden ImageViewers to preload all floors for cross-floor search */}
         {floors.map((floor, floorIndex) => (
           floorIndex !== selectedFloor && (
             <View key={`hidden-${floor.id}`} style={{ position: 'absolute', left: -10000, top: -10000, width: 1, height: 1, overflow: 'hidden' }}>
-              <PDFViewer
+              <ImageViewer
                 buildingId={buildingId}
-                fileName={floor.pdfFile}
-                fileType="pdf"
-                pdfAssetModule={floor.pdfModule}
+                fileName={floor.imageFile}
+                imageAssetModule={floor.imageModule}
                 searchText={searchingAcrossFloors ? committed : ''}
                 onMatchChange={(matches, index) => handleMatchChange(matches, index, floorIndex)}
                 currentMatchIndex={0}
@@ -262,13 +261,12 @@ const SearchScreen = ({ navigation, route }) => {
           )
         ))}
         
-        {/* Main visible PDFViewer */}
+        {/* Main visible ImageViewer */}
         {currentFloor ? (
-          <PDFViewer
+          <ImageViewer
             buildingId={buildingId}
-            fileName={currentFloor.pdfFile}
-            fileType="pdf"
-            pdfAssetModule={currentFloor.pdfModule}
+            fileName={currentFloor.imageFile}
+            imageAssetModule={currentFloor.imageModule}
             searchText={committed}
             onMatchChange={(matches, index) => handleMatchChange(matches, index, selectedFloor)}
             currentMatchIndex={matchIndex}
