@@ -3,7 +3,6 @@ import { View, Text, ScrollView, StyleSheet, Dimensions } from 'react-native';
 import { WebView } from 'react-native-webview';
 import { Asset } from 'expo-asset';
 import * as FileSystem from 'expo-file-system/legacy';
-import Svg, { Circle } from 'react-native-svg';
 
 const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText, onMatchChange, currentMatchIndex = 0, entranceCoordinates = null }) => {
   const [isLoading, setIsLoading] = useState(false);
@@ -435,39 +434,35 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
               onError={(error) => setError(`WebView error: ${error.nativeEvent.description}`)}
             />
             
-            {/* Overlay markers - only show when searching */}
-            <Svg 
-              style={StyleSheet.absoluteFill}
-              width={viewerWidth} 
-              height={viewerHeight}
-            >
+            {/* Visual markers for rooms and entrances - using View instead of SVG */}
+            <View style={StyleSheet.absoluteFill}>
               {/* Show matching rooms when searching */}
               {searchText && displayRooms.map((room, index) => (
-                <Circle
+                <View
                   key={`room-${index}`}
-                  cx={room.x}
-                  cy={room.y}
-                  r={10}
-                  fill="#4CAF50"
-                  stroke="#2E7D32"
-                  strokeWidth={2}
-                  opacity={0.9}
+                  style={[
+                    styles.roomMarker,
+                    {
+                      left: room.x - 10,
+                      top: room.y - 10,
+                    }
+                  ]}
                 />
               ))}
               
               {/* Show nearest entrance when searching and found, or use provided entrance coordinates */}
               {searchText && (nearestEntrance || entranceCoordinates) && (
-                <Circle
-                  cx={entranceCoordinates ? entranceCoordinates.x : nearestEntrance.x}
-                  cy={entranceCoordinates ? entranceCoordinates.y : nearestEntrance.y}
-                  r={8}
-                  fill="#FF9800"
-                  stroke="#F57C00"
-                  strokeWidth={2}
-                  opacity={0.9}
+                <View
+                  style={[
+                    styles.entranceMarker,
+                    {
+                      left: (entranceCoordinates ? entranceCoordinates.x : nearestEntrance.x) - 8,
+                      top: (entranceCoordinates ? entranceCoordinates.y : nearestEntrance.y) - 8,
+                    }
+                  ]}
                 />
               )}
-            </Svg>
+            </View>
           </View>
         </View>
       )}
@@ -567,6 +562,26 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#333',
     marginBottom: 2,
+  },
+  roomMarker: {
+    position: 'absolute',
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: '#4CAF50',
+    borderWidth: 2,
+    borderColor: '#2E7D32',
+    opacity: 0.9,
+  },
+  entranceMarker: {
+    position: 'absolute',
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: '#FF9800',
+    borderWidth: 2,
+    borderColor: '#F57C00',
+    opacity: 0.9,
   },
 });
 
