@@ -100,6 +100,161 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
   </div>
 
   <script>
+    // Function to check if text is visible and relevant to user
+    function isVisibleRoomText(text, fontSize = 0, opacity = 1) {
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'debug',
+        message: 'Checking text "' + text + '" with fontSize: ' + fontSize + ' opacity: ' + opacity
+      }));
+      
+      if (!text || text.length < 1) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Rejected: too short'
+        }));
+        return false;
+      }
+      
+      // Skip very small text (likely metadata) - lowered threshold from 8 to 2
+      if (fontSize > 0 && fontSize < 2) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Rejected: font too small (' + fontSize + ')'
+        }));
+        return false;
+      }
+      
+      // Skip invisible text
+      if (opacity < 0.1) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Rejected: opacity too low'
+        }));
+        return false;
+      }
+      
+      // Skip text that looks like metadata or measurements
+      if (/^\d+\.\d+m2$/i.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Rejected: area measurement'
+        }));
+        return false; // Skip area measurements like "12.92m2"
+      }
+      if (/^Room \d+\.\d+m2$/i.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Rejected: room area format'
+        }));
+        return false; // Skip "Room 12.92m2" format
+      }
+      if (/^Area:/i.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Rejected: area label'
+        }));
+        return false; // Skip area labels
+      }
+      if (/^Type:/i.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Rejected: type label'
+        }));
+        return false; // Skip type labels
+      }
+      if (/^\d+\.\d+$/i.test(text) && text.length > 6) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Rejected: long decimal'
+        }));
+        return false; // Skip long decimal numbers
+      }
+      
+      // Skip very short single characters or numbers (likely artifacts)
+      if (text.length === 1 && /[0-9.]/.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Rejected: single char/number'
+        }));
+        return false;
+      }
+      
+      // Skip common PDF metadata terms
+      if (/^(width|height|scale|rotation|metadata|properties)$/i.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Rejected: metadata term'
+        }));
+        return false;
+      }
+      
+      // Accept text that looks like room identifiers
+      // Examples: "PH-D1", "01_02", "11_03", "A.1.01", etc.
+      if (/^[A-Z0-9]{1,3}[-._][A-Z0-9]{1,3}$/.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Accepted: room format 1'
+        }));
+        return true; // Format like "PH-D1"
+      }
+      if (/^\d{2}_\d{2}$/.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Accepted: room format 2'
+        }));
+        return true; // Format like "01_02"
+      }
+      if (/^[A-Z]\.\d\.\d{2}$/.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Accepted: room format 3'
+        }));
+        return true; // Format like "A.1.01"
+      }
+      if (/^PH-D\d+\.?\d*_?\d*$/.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Accepted: room format 4'
+        }));
+        return true; // Format like "PH-D1.11_01"
+      }
+      
+      // Accept text with "indgang" (entrance)
+      if (/indgang/i.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Accepted: entrance'
+        }));
+        return true;
+      }
+      
+      // Accept short alphanumeric room codes (2-8 characters)
+      if (/^[A-Z0-9]{2,8}$/.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Accepted: alphanumeric code'
+        }));
+        return true;
+      }
+      
+      // Accept numbered rooms like "101", "202", etc. (2-4 digits)
+      if (/^\d{2,4}$/.test(text)) {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: '  - Accepted: numbered room'
+        }));
+        return true;
+      }
+      
+      window.ReactNativeWebView.postMessage(JSON.stringify({
+        type: 'debug',
+        message: '  - Rejected: no match'
+      }));
+      
+      // Reject everything else (likely metadata)
+      return false;
+    }
+
     async function loadPDF() {
       try {
         // Set up PDF.js worker
@@ -158,9 +313,33 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
         const foundEntrances = [];
         
         // Method 1: Extract from raw text content items with their positions
-        textContent.items.forEach(item => {
+        window.ReactNativeWebView.postMessage(JSON.stringify({
+          type: 'debug',
+          message: 'Method 1: Processing ' + textContent.items.length + ' text items'
+        }));
+        
+        textContent.items.forEach((item, index) => {
           const text = item.str.trim();
           if (!text || text.length < 2) return; // Skip very short text
+          
+          // Send debug info about each text item
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'debug',
+            message: 'Item ' + index + ': "' + text + '"'
+          }));
+          
+          // Get font size from text item (if available)
+          const fontSize = item.height || 0;
+          
+          // Check if text passes filter BEFORE coordinate calculation
+          const passesFilter = isVisibleRoomText(text, fontSize);
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'debug',
+            message: 'Text "' + text + '" passes filter: ' + passesFilter
+          }));
+          
+          // Filter to only include text that is visible and relevant to user
+          if (!passesFilter) return;
           
           // Transform coordinates from PDF space to canvas space
           const transform = item.transform;
@@ -174,6 +353,12 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
           // Normalize coordinates (0-1 range)
           const normalizedX = canvasX / viewport.width;
           const normalizedY = canvasY / viewport.height;
+          
+          // Send coordinate debug info
+          window.ReactNativeWebView.postMessage(JSON.stringify({
+            type: 'debug',
+            message: 'Coordinates for "' + text + '": x=' + x + ', y=' + y + ' -> normalized: ' + normalizedX + ', ' + normalizedY
+          }));
           
           // Ensure coordinates are within bounds
           const boundedX = Math.max(0, Math.min(1, normalizedX));
@@ -205,18 +390,37 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
           const text = span.textContent.trim();
           if (!text || text.length < 2) return; // Skip very short text
           
-          const rect = span.getBoundingClientRect();
-          const containerRect = document.getElementById('viewer').getBoundingClientRect();
+          // Get computed style to check visibility
+          const style = window.getComputedStyle(span);
+          const fontSize = parseFloat(style.fontSize) || 0;
+          const opacity = parseFloat(style.opacity) || 1;
           
-          const x = (rect.left - containerRect.left + rect.width / 2);
-          const y = (rect.top - containerRect.top + rect.height / 2);
+          // Filter to only include text that is visible and relevant to user
+          if (!isVisibleRoomText(text, fontSize, opacity)) return;
+          
+          const rect = span.getBoundingClientRect();
+          const textLayerRect = textLayer.getBoundingClientRect();
+          
+          // Calculate position relative to text layer (which has the same dimensions as viewport)
+          const x = (rect.left - textLayerRect.left + rect.width / 2);
+          const y = (rect.top - textLayerRect.top + rect.height / 2);
           
           const normalizedX = x / viewport.width;
           const normalizedY = y / viewport.height;
           
+          // Debug logging for Method 2
+          console.log('Method 2 coordinate calculation for:', text);
+          console.log('  rect:', rect);
+          console.log('  textLayerRect:', textLayerRect);
+          console.log('  x, y:', x, y);
+          console.log('  viewport:', viewport.width, viewport.height);
+          console.log('  normalizedX, normalizedY:', normalizedX, normalizedY);
+          
           // Ensure coordinates are within bounds
           const boundedX = Math.max(0, Math.min(1, normalizedX));
           const boundedY = Math.max(0, Math.min(1, normalizedY));
+          
+          console.log('  boundedX, boundedY:', boundedX, boundedY);
           
           // Check if this text contains "indgang" - if so, it's an entrance
           if (/indgang/i.test(text)) {
@@ -350,12 +554,20 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
       const data = JSON.parse(event.nativeEvent.data);
       
       switch (data.type) {
+        case 'debug':
+          console.log('WebView Debug:', data.message);
+          break;
+          
         case 'dimensions':
+          console.log('PDF dimensions received:', data.width, data.height);
           setPdfDimensions({ width: data.width, height: data.height });
           break;
           
         case 'extracted':
           // Convert normalized coordinates to screen coordinates and store all items
+          console.log('PDF extraction completed, viewerWidth:', viewerWidth, 'viewerHeight:', viewerHeight);
+          console.log('Raw extracted rooms:', data.rooms.length, 'entrances:', data.entrances.length);
+          
           const screenRooms = data.rooms.map(room => ({
             ...room,
             x: room.x * viewerWidth,
@@ -368,6 +580,9 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
             x: entrance.x * viewerWidth,
             y: entrance.y * viewerHeight
           }));
+          
+          console.log('Converted screen rooms:', screenRooms.slice(0, 3)); // Log first 3 rooms
+          console.log('Converted screen entrances:', screenEntrances);
           
           // Store all rooms and entrances but don't display by default
           setAllRooms(screenRooms);
@@ -437,31 +652,38 @@ const PDFViewer = ({ buildingId, fileName, fileType, pdfAssetModule, searchText,
             {/* Visual markers for rooms and entrances - using View instead of SVG */}
             <View style={StyleSheet.absoluteFill}>
               {/* Show matching rooms when searching */}
-              {searchText && displayRooms.map((room, index) => (
-                <View
-                  key={`room-${index}`}
-                  style={[
-                    styles.roomMarker,
-                    {
-                      left: room.x - 10,
-                      top: room.y - 10,
-                    }
-                  ]}
-                />
-              ))}
+              {searchText && displayRooms.map((room, index) => {
+                console.log(`Displaying room marker ${index}:`, { x: room.x, y: room.y, id: room.id });
+                return (
+                  <View
+                    key={`room-${index}`}
+                    style={[
+                      styles.roomMarker,
+                      {
+                        left: room.x - 10,
+                        top: room.y - 10,
+                      }
+                    ]}
+                  />
+                );
+              })}
               
               {/* Show nearest entrance when searching and found, or use provided entrance coordinates */}
-              {searchText && (nearestEntrance || entranceCoordinates) && (
-                <View
-                  style={[
-                    styles.entranceMarker,
-                    {
-                      left: (entranceCoordinates ? entranceCoordinates.x : nearestEntrance.x) - 8,
-                      top: (entranceCoordinates ? entranceCoordinates.y : nearestEntrance.y) - 8,
-                    }
-                  ]}
-                />
-              )}
+              {searchText && (nearestEntrance || entranceCoordinates) && (() => {
+                const entrance = entranceCoordinates || nearestEntrance;
+                console.log('Displaying entrance marker:', { x: entrance.x, y: entrance.y });
+                return (
+                  <View
+                    style={[
+                      styles.entranceMarker,
+                      {
+                        left: entrance.x - 8,
+                        top: entrance.y - 8,
+                      }
+                    ]}
+                  />
+                );
+              })()}
             </View>
           </View>
         </View>
