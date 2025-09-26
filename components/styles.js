@@ -40,4 +40,16 @@ export default StyleSheet.create({
   svgContainer: {
     marginTop: 30,
   },
+  mapContainer: {
+    marginTop: 20,
+    width: 350,
+    height: 480,
+    backgroundColor: '#fff',
+    borderRadius: 8,
+    overflow: 'hidden',
+    shadowColor: '#000',
+    shadowOpacity: 0.08,
+    shadowRadius: 6,
+    shadowOffset: { width: 0, height: 2 },
+  },
 });
